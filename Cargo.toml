@@ -128,6 +128,10 @@ tempfile = "3"
 [build-dependencies]
 protobuf-codegen = "3.7"
 
+[features]
+default = []
+aml = ["hwcodec/aml"]
+
 [profile.release]
 opt-level = 3
 lto = true

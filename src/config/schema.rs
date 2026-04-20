@@ -691,9 +691,27 @@ pub enum EncoderType {
     Rkmpp,
     /// V4L2 M2M hardware encoder
     V4l2m2m,
+    /// Amlogic Wave521 VPU encoder
+    Aml,
 }
 
 impl EncoderType {
+    /// Convert to EncoderBackend for registry queries
+    pub fn to_backend(&self) -> Option<crate::video::encoder::registry::EncoderBackend> {
+        use crate::video::encoder::registry::EncoderBackend;
+        match self {
+            EncoderType::Auto => None,
+            EncoderType::Software => Some(EncoderBackend::Software),
+            EncoderType::Vaapi => Some(EncoderBackend::Vaapi),
+            EncoderType::Nvenc => Some(EncoderBackend::Nvenc),
+            EncoderType::Qsv => Some(EncoderBackend::Qsv),
+            EncoderType::Amf => Some(EncoderBackend::Amf),
+            EncoderType::Rkmpp => Some(EncoderBackend::Rkmpp),
+            EncoderType::V4l2m2m => Some(EncoderBackend::V4l2m2m),
+            EncoderType::Aml => Some(EncoderBackend::Amlvenc),
+        }
+    }
+
     /// Get display name for UI
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -705,6 +723,7 @@ impl EncoderType {
             EncoderType::Amf => "AMD AMF",
             EncoderType::Rkmpp => "Rockchip MPP",
             EncoderType::V4l2m2m => "V4L2 M2M",
+            EncoderType::Aml => "Amlogic VPU",
         }
     }
 }

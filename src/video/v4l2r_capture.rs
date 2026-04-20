@@ -22,6 +22,7 @@ use v4l2r::nix::errno::Errno;
 use v4l2r::{Format as V4l2rFormat, PixelFormat as V4l2rPixelFormat, QueueType};
 
 use crate::error::{AppError, Result};
+use crate::video::capture_trait::{CaptureResult, CaptureStream, FrameData};
 use crate::video::csi_bridge::{self, CsiBridgeKind, ProbeResult};
 use crate::video::format::{PixelFormat, Resolution};
 use crate::video::SignalStatus;
@@ -748,4 +749,29 @@ fn set_fps(fd: &File, queue: QueueType, fps: u32) -> std::result::Result<(), ioc
 
     let _actual: v4l2_streamparm = ioctl::s_parm(fd, params)?;
     Ok(())
+}
+
+impl CaptureStream for V4l2rCaptureStream {
+    fn next_frame(&mut self) -> io::Result<CaptureResult> {
+        let mut data = Vec::new();
+        let meta = self.next_into(&mut data)?;
+        Ok(CaptureResult {
+            frame: FrameData::Mapped { data, meta },
+            resolution: self.resolution,
+            format: self.format,
+            reconfigured: false,
+        })
+    }
+
+    fn resolution(&self) -> Resolution {
+        self.resolution
+    }
+
+    fn format(&self) -> PixelFormat {
+        self.format
+    }
+
+    fn release_frame(&mut self, _frame: &FrameData) {
+        // V4l2rCaptureStream re-queues buffers inside next_into(), so nothing to do
+    }
 }

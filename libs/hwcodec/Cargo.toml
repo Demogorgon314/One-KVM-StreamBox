@@ -10,6 +10,7 @@ ignored = ["serde"]
 [features]
 default = []
 rkmpp = []
+aml = []
 
 [dependencies]
 log = "0.4"

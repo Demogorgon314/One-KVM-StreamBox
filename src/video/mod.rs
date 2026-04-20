@@ -4,6 +4,9 @@
 
 pub(crate) mod capture_limits;
 pub(crate) mod capture_status;
+pub mod capture_trait;
+#[cfg(feature = "aml")]
+pub mod aml_pipeline;
 pub mod codec_constraints;
 pub mod convert;
 pub mod csi_bridge;
@@ -19,6 +22,8 @@ pub mod traits;
 pub mod types;
 pub mod usb_reset;
 pub mod v4l2r_capture;
+#[cfg(feature = "aml")]
+pub mod vfmcap_capture;
 
 pub use convert::{PixelConverter, Yuv420pBuffer};
 pub use device::{VideoDevice, VideoDeviceInfo};
@@ -106,4 +111,8 @@ pub(crate) fn is_rkcif_driver(driver: &str) -> bool {
 /// that require special enumeration and format-selection logic.
 pub(crate) fn is_csi_hdmi_bridge(device: &device::VideoDeviceInfo) -> bool {
     is_rk_hdmirx_device(device) || is_rkcif_driver(&device.driver)
+}
+
+pub(crate) fn is_aml_vfmcap_device() -> bool {
+    std::path::Path::new("/dev/video_cap").exists()
 }
