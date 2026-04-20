@@ -15,9 +15,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Web framework
-axum = { version = "0.8", features = ["ws", "multipart", "tokio"] }
-axum-extra = { version = "0.12", features = ["typed-header", "cookie"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip"] }
+axum = { version = "0.7", features = ["ws", "multipart", "tokio"] }
+axum-extra = { version = "0.9", features = ["typed-header", "cookie"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "trace", "compression-gzip"] }
 
 # Database - Use bundled SQLite for static linking
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
@@ -37,7 +37,7 @@ anyhow = "1"
 
 # Authentication
 argon2 = "0.5"
-rand = "0.9"
+rand = "0.8"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -47,7 +47,7 @@ nix = { version = "0.30", features = ["fs", "net", "hostname", "poll"] }
 
 # HTTP client (for URL downloads)
 # Use rustls by default, but allow native-tls for systems with older GLIBC
-reqwest = { version = "0.13", features = ["stream", "rustls", "json"], default-features = false }
+reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"], default-features = false }
 urlencoding = "2"
 
 # Static file embedding
@@ -55,9 +55,9 @@ rust-embed = { version = "6", features = ["compression"] }
 mime_guess = "2"
 
 # TLS/HTTPS
-rustls = { version = "0.23", features = ["ring"] }
-rcgen = "0.14"
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls = { version = "0.22", features = ["ring"] }
+rcgen = "0.13"
+axum-server = { version = "0.6", features = ["tls-rustls"] }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
@@ -83,15 +83,15 @@ async-stream = "0.3"
 futures = "0.3"
 
 # WebSocket client (for ttyd proxy)
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.24"
 
 # High-performance synchronization
 parking_lot = "0.12"
 arc-swap = "1.8"
 
 # WebRTC
-webrtc = "0.14"
-rtp = "0.14"
+webrtc = "0.10"
+rtp = "0.9"
 rtsp-types = "0.1"
 sdp-types = "0.1"
 
@@ -130,7 +130,7 @@ tempfile = "3"
 
 [build-dependencies]
 protobuf-codegen = "3.7"
-toml = "0.9"
+toml = "0.8"
 cc = "1"
 
 [features]
