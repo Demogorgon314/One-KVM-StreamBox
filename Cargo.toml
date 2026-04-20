@@ -51,7 +51,7 @@ reqwest = { version = "0.13", features = ["stream", "rustls", "json"], default-f
 urlencoding = "2"
 
 # Static file embedding
-rust-embed = { version = "8", features = ["compression"] }
+rust-embed = { version = "6", features = ["compression"] }
 mime_guess = "2"
 
 # TLS/HTTPS
