@@ -14,6 +14,11 @@ use hwcodec::ffmpeg_hw::{
 };
 use tracing::info;
 
+#[cfg(feature = "aml")]
+use crate::video::encoder::aml_venc::AmlVencEncoder;
+#[cfg(feature = "aml")]
+use crate::ffi::multienc::{VlCodecId, VlImgFormat};
+
 use super::SharedVideoPipelineConfig;
 
 pub(super) struct EncoderThreadState {
@@ -180,6 +185,13 @@ pub(super) fn build_encoder_state(
     let is_rkmpp_available = registry
         .encoder_with_backend(VideoEncoderType::H264, EncoderBackend::Rkmpp)
         .is_some();
+    #[cfg(feature = "aml")]
+    let is_amlvenc_available = registry
+        .encoder_with_backend(VideoEncoderType::H265, EncoderBackend::Amlvenc)
+        .is_some()
+        || registry
+            .encoder_with_backend(VideoEncoderType::H264, EncoderBackend::Amlvenc)
+            .is_some();
     let use_yuyv_direct =
         is_rkmpp_available && !needs_mjpeg_decode && config.input_format == PixelFormat::Yuyv;
     let use_rkmpp_direct = is_rkmpp_available
@@ -203,6 +215,11 @@ pub(super) fn build_encoder_state(
             "RKMPP backend detected with {} input, enabling direct input optimization",
             config.input_format
         );
+    }
+
+    #[cfg(feature = "aml")]
+    if is_amlvenc_available {
+        info!("Amlogic Wave521 VPU encoder detected, enabling AML direct path");
     }
 
     let selected_codec_name = match config.output_codec {
@@ -435,7 +452,10 @@ pub(super) fn build_encoder_state(
     };
 
     let codec_name = encoder.codec_name();
-    let use_direct_input = if codec_name.contains("rkmpp") {
+    let use_direct_input = if codec_name.contains("amlvenc") {
+        // Amlogic VPU encoder uses DMA-buf directly from vfmcap, no CPU conversion
+        true
+    } else if codec_name.contains("rkmpp") {
         matches!(
             pipeline_input_format,
             PixelFormat::Yuyv
@@ -455,7 +475,10 @@ pub(super) fn build_encoder_state(
     } else {
         false
     };
-    let needs_yuv420p = if codec_name.contains("libx264") {
+    let needs_yuv420p = if codec_name.contains("amlvenc") {
+        // Amlogic VPU encoder takes NV12 DMA-buf directly
+        false
+    } else if codec_name.contains("libx264") {
         !matches!(
             pipeline_input_format,
             PixelFormat::Nv12 | PixelFormat::Nv16 | PixelFormat::Nv21 | PixelFormat::Yuv420

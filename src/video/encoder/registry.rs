@@ -96,6 +96,8 @@ pub enum EncoderBackend {
     Rkmpp,
     /// V4L2 Memory-to-Memory (ARM)
     V4l2m2m,
+    /// Amlogic Wave521 VPU (libmultienc)
+    Amlvenc,
     /// Software encoding (libx264, libx265, libvpx)
     Software,
 }
@@ -115,6 +117,8 @@ impl EncoderBackend {
             EncoderBackend::Rkmpp
         } else if name.contains("v4l2m2m") {
             EncoderBackend::V4l2m2m
+        } else if name.contains("amlvenc") || name.contains("aml") {
+            EncoderBackend::Amlvenc
         } else {
             EncoderBackend::Software
         }
@@ -134,6 +138,7 @@ impl EncoderBackend {
             EncoderBackend::Amf => "AMF",
             EncoderBackend::Rkmpp => "RKMPP",
             EncoderBackend::V4l2m2m => "V4L2 M2M",
+            EncoderBackend::Amlvenc => "AML VPU",
             EncoderBackend::Software => "Software",
         }
     }
@@ -148,6 +153,7 @@ impl EncoderBackend {
             "amf" => Some(EncoderBackend::Amf),
             "rkmpp" => Some(EncoderBackend::Rkmpp),
             "v4l2m2m" | "v4l2" => Some(EncoderBackend::V4l2m2m),
+            "amlvenc" | "aml" => Some(EncoderBackend::Amlvenc),
             "software" | "cpu" => Some(EncoderBackend::Software),
             _ => None,
         }

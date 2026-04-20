@@ -603,6 +603,8 @@ pub enum EncoderType {
     Rkmpp,
     /// V4L2 M2M hardware encoder
     V4l2m2m,
+    /// Amlogic Wave521 VPU encoder
+    Aml,
 }
 
 impl EncoderType {
@@ -618,6 +620,7 @@ impl EncoderType {
             EncoderType::Amf => Some(EncoderBackend::Amf),
             EncoderType::Rkmpp => Some(EncoderBackend::Rkmpp),
             EncoderType::V4l2m2m => Some(EncoderBackend::V4l2m2m),
+            EncoderType::Aml => Some(EncoderBackend::Amlvenc),
         }
     }
 
@@ -632,6 +635,7 @@ impl EncoderType {
             EncoderType::Amf => "AMD AMF",
             EncoderType::Rkmpp => "Rockchip MPP",
             EncoderType::V4l2m2m => "V4L2 M2M",
+            EncoderType::Aml => "Amlogic VPU",
         }
     }
 }

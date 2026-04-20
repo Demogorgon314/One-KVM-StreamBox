@@ -98,7 +98,11 @@ mod ffmpeg {
 
         link_os();
         build_ffmpeg_ram(builder);
-        build_ffmpeg_hw(builder);
+        if std::env::var_os("CARGO_FEATURE_AML").is_some() {
+            println!("cargo:info=Skipping ffmpeg_hw build (aml feature active, using libmultienc instead)");
+        } else {
+            build_ffmpeg_hw(builder);
+        }
     }
 
     /// Link system FFmpeg using pkg-config or custom path

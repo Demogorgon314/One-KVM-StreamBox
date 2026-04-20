@@ -133,6 +133,10 @@ protobuf-codegen = "3.7"
 toml = "0.9"
 cc = "1"
 
+[features]
+default = []
+aml = ["hwcodec/aml"]
+
 [profile.release]
 opt-level = 3
 lto = true

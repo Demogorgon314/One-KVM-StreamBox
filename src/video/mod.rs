@@ -2,6 +2,7 @@
 //!
 //! This module provides V4L2 video capture, encoding, and streaming functionality.
 
+pub mod capture_trait;
 pub mod codec_constraints;
 pub mod convert;
 pub mod decoder;
@@ -13,6 +14,10 @@ pub mod shared_video_pipeline;
 pub mod stream_manager;
 pub mod streamer;
 pub mod v4l2r_capture;
+#[cfg(feature = "aml")]
+pub mod vfmcap_capture;
+#[cfg(feature = "aml")]
+pub mod aml_pipeline;
 
 pub use convert::{PixelConverter, Yuv420pBuffer};
 pub use device::{VideoDevice, VideoDeviceInfo};
@@ -31,4 +36,8 @@ pub(crate) fn is_rk_hdmirx_driver(driver: &str, card: &str) -> bool {
 
 pub(crate) fn is_rk_hdmirx_device(device: &device::VideoDeviceInfo) -> bool {
     is_rk_hdmirx_driver(&device.driver, &device.card)
+}
+
+pub(crate) fn is_aml_vfmcap_device() -> bool {
+    std::path::Path::new("/dev/video_cap").exists()
 }
