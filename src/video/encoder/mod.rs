@@ -1,59 +1,59 @@
-//! Video encoder implementations
-//!
-//! This module provides video encoding capabilities including:
-//! - JPEG encoding for raw frames (YUYV, NV12, etc.)
-//! - H264 encoding (hardware + software)
-//! - H265 encoding (hardware + software)
-//! - VP8 encoding (hardware + software)
-//! - VP9 encoding (hardware + software)
-//! - WebRTC video codec abstraction
-//! - Encoder registry for automatic detection
-
+#[cfg(feature = "hwencode")]
 use hwcodec::common::DataFormat;
+#[cfg(feature = "hwencode")]
 use hwcodec::ffmpeg_ram::CodecInfo;
 
+#[cfg(feature = "hwencode")]
 pub mod codec;
+#[cfg(feature = "hwencode")]
 pub mod h264;
+#[cfg(feature = "hwencode")]
 pub mod h265;
+#[cfg(feature = "hwencode")]
 pub mod jpeg;
+#[cfg(feature = "hwencode")]
 pub mod registry;
+#[cfg(feature = "hwencode")]
 pub mod self_check;
 pub mod traits;
+#[cfg(feature = "hwencode")]
 pub mod vp8;
+#[cfg(feature = "hwencode")]
 pub mod vp9;
 #[cfg(feature = "aml")]
 pub mod aml_venc;
 
-// Core traits and types
 pub use traits::{
     BitratePreset, EncodedFormat, EncodedFrame, Encoder, EncoderConfig, EncoderFactory,
 };
 
-// WebRTC codec abstraction
+#[cfg(feature = "hwencode")]
 pub use codec::{CodecFrame, VideoCodec, VideoCodecConfig, VideoCodecFactory, VideoCodecType};
 
-// Encoder registry
+#[cfg(feature = "hwencode")]
 pub use registry::{AvailableEncoder, EncoderBackend, EncoderRegistry, VideoEncoderType};
+#[cfg(feature = "hwencode")]
 pub use self_check::{
     build_hardware_self_check_runtime_error, run_hardware_self_check, VideoEncoderSelfCheckCell,
     VideoEncoderSelfCheckCodec, VideoEncoderSelfCheckResponse, VideoEncoderSelfCheckRow,
 };
 
-// H264 encoder
+#[cfg(feature = "hwencode")]
 pub use h264::{H264Config, H264Encoder, H264EncoderType, H264InputFormat};
 
-// H265 encoder
+#[cfg(feature = "hwencode")]
 pub use h265::{H265Config, H265Encoder, H265EncoderType, H265InputFormat};
 
-// VP8 encoder
+#[cfg(feature = "hwencode")]
 pub use vp8::{VP8Config, VP8Encoder, VP8EncoderType, VP8InputFormat};
 
-// VP9 encoder
+#[cfg(feature = "hwencode")]
 pub use vp9::{VP9Config, VP9Encoder, VP9EncoderType, VP9InputFormat};
 
-// JPEG encoder
+#[cfg(feature = "hwencode")]
 pub use jpeg::JpegEncoder;
 
+#[cfg(feature = "hwencode")]
 pub(crate) fn select_codec_for_format<F>(
     encoders: &[CodecInfo],
     format: DataFormat,
@@ -68,6 +68,7 @@ where
         .or_else(|| encoders.iter().find(|codec| codec.format == format))
 }
 
+#[cfg(feature = "hwencode")]
 pub(crate) fn detect_best_codec_for_format<T, F>(
     encoders: &[CodecInfo],
     format: DataFormat,

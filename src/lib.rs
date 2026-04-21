@@ -1,8 +1,3 @@
-//! One-KVM - Lightweight IP-KVM solution
-//!
-//! This crate provides the core functionality for One-KVM,
-//! a remote KVM (Keyboard, Video, Mouse) solution written in Rust.
-
 pub mod atx;
 pub mod audio;
 pub mod auth;
@@ -14,7 +9,9 @@ pub mod hid;
 pub mod modules;
 pub mod msd;
 pub mod otg;
+#[cfg(feature = "hwencode")]
 pub mod rtsp;
+#[cfg(feature = "hwencode")]
 pub mod rustdesk;
 pub mod state;
 pub mod stream;
@@ -22,6 +19,7 @@ pub mod update;
 pub mod utils;
 pub mod video;
 pub mod web;
+#[cfg(feature = "hwencode")]
 pub mod webrtc;
 
 /// Auto-generated secrets module (from secrets.toml at compile time)

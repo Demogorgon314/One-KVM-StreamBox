@@ -13,7 +13,9 @@ use crate::extensions::{ExtensionId, ExtensionManager};
 use crate::hid::HidController;
 use crate::msd::MsdController;
 use crate::otg::OtgService;
+#[cfg(feature = "hwencode")]
 use crate::rtsp::RtspService;
+#[cfg(feature = "hwencode")]
 use crate::rustdesk::RustDeskService;
 use crate::update::UpdateService;
 use crate::video::VideoStreamManager;
@@ -50,11 +52,10 @@ pub struct AppState {
     pub atx: Arc<RwLock<Option<AtxController>>>,
     /// Audio controller
     pub audio: Arc<AudioController>,
-    /// RustDesk remote access service (optional)
+    #[cfg(feature = "hwencode")]
     pub rustdesk: Arc<RwLock<Option<Arc<RustDeskService>>>>,
-    /// RTSP streaming service (optional)
+    #[cfg(feature = "hwencode")]
     pub rtsp: Arc<RwLock<Option<Arc<RtspService>>>>,
-    /// Extension manager (ttyd, gostc, easytier)
     pub extensions: Arc<ExtensionManager>,
     /// Event bus for real-time notifications
     pub events: Arc<EventBus>,
@@ -71,7 +72,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Create new application state
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: ConfigStore,
@@ -83,8 +83,8 @@ impl AppState {
         msd: Option<MsdController>,
         atx: Option<AtxController>,
         audio: Arc<AudioController>,
-        rustdesk: Option<Arc<RustDeskService>>,
-        rtsp: Option<Arc<RtspService>>,
+        #[cfg(feature = "hwencode")] rustdesk: Option<Arc<RustDeskService>>,
+        #[cfg(feature = "hwencode")] rtsp: Option<Arc<RtspService>>,
         extensions: Arc<ExtensionManager>,
         events: Arc<EventBus>,
         update: Arc<UpdateService>,
@@ -103,7 +103,9 @@ impl AppState {
             msd: Arc::new(RwLock::new(msd)),
             atx: Arc::new(RwLock::new(atx)),
             audio,
+            #[cfg(feature = "hwencode")]
             rustdesk: Arc::new(RwLock::new(rustdesk)),
+            #[cfg(feature = "hwencode")]
             rtsp: Arc::new(RwLock::new(rtsp)),
             extensions,
             events,

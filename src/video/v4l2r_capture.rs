@@ -18,15 +18,8 @@ use v4l2r::nix::errno::Errno;
 use v4l2r::{Format as V4l2rFormat, PixelFormat as V4l2rPixelFormat, QueueType};
 
 use crate::error::{AppError, Result};
-use crate::video::capture_trait::{CaptureResult, CaptureStream, FrameData};
+use crate::video::capture_trait::{CaptureMeta, CaptureResult, CaptureStream, FrameData};
 use crate::video::format::{PixelFormat, Resolution};
-
-/// Metadata for a captured frame.
-#[derive(Debug, Clone, Copy)]
-pub struct CaptureMeta {
-    pub bytes_used: usize,
-    pub sequence: u64,
-}
 
 /// V4L2 capture stream backed by v4l2r ioctl.
 pub struct V4l2rCaptureStream {

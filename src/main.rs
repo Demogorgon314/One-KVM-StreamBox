@@ -20,17 +20,24 @@ use one_kvm::extensions::ExtensionManager;
 use one_kvm::hid::{HidBackendType, HidController};
 use one_kvm::msd::MsdController;
 use one_kvm::otg::OtgService;
+#[cfg(feature = "hwencode")]
 use one_kvm::rtsp::RtspService;
+#[cfg(feature = "hwencode")]
 use one_kvm::rustdesk::RustDeskService;
 use one_kvm::state::AppState;
 use one_kvm::update::UpdateService;
 use one_kvm::utils::bind_tcp_listener;
+#[cfg(feature = "hwencode")]
 use one_kvm::video::codec_constraints::{
     enforce_constraints_with_stream_manager, StreamCodecConstraints,
 };
 use one_kvm::video::format::{PixelFormat, Resolution};
+#[cfg(feature = "hwencode")]
 use one_kvm::video::{Streamer, VideoStreamManager};
+#[cfg(not(feature = "hwencode"))]
+use one_kvm::video::VideoStreamManager;
 use one_kvm::web;
+#[cfg(feature = "hwencode")]
 use one_kvm::webrtc::{WebRtcStreamer, WebRtcStreamerConfig};
 
 /// Log level for the application
@@ -234,293 +241,178 @@ async fn main() -> anyhow::Result<()> {
         video_resolution.height
     );
 
-    // Create video streamer and initialize with config if device is set
-    let streamer = Streamer::new();
-    streamer.set_event_bus(events.clone()).await;
-    if let Some(ref device_path) = config.video.device {
-        if let Err(e) = streamer
-            .apply_video_config(
-                device_path,
-                video_format,
-                video_resolution,
-                config.video.fps,
-            )
-            .await
-        {
+    #[cfg(feature = "hwencode")]
+    let stream_manager = {
+        let streamer = Streamer::new();
+        streamer.set_event_bus(events.clone()).await;
+        if let Some(ref device_path) = config.video.device {
+            if let Err(e) = streamer
+                .apply_video_config(
+                    device_path,
+                    video_format,
+                    video_resolution,
+                    config.video.fps,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to initialize video with config: {}, will auto-detect",
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "Video configured: {} @ {}x{} {}",
+                    device_path,
+                    video_resolution.width,
+                    video_resolution.height,
+                    video_format
+                );
+            }
+        }
+
+        let webrtc_streamer = {
+            let webrtc_config = WebRtcStreamerConfig {
+                resolution: video_resolution,
+                input_format: video_format,
+                fps: config.video.fps,
+                bitrate_preset: config.stream.bitrate_preset,
+                encoder_backend: config.stream.encoder.to_backend(),
+                webrtc: {
+                    let mut stun_servers = vec![];
+                    let mut turn_servers = vec![];
+
+                    let has_custom_stun = config
+                        .stream
+                        .stun_server
+                        .as_ref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false);
+                    let has_custom_turn = config
+                        .stream
+                        .turn_server
+                        .as_ref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false);
+
+                    if !has_custom_stun && !has_custom_turn {
+                        use one_kvm::webrtc::config::public_ice;
+                        if public_ice::is_configured() {
+                            if let Some(stun) = public_ice::stun_server() {
+                                stun_servers.push(stun.clone());
+                                tracing::info!("Using public STUN server: {}", stun);
+                            }
+                            for turn in public_ice::turn_servers() {
+                                tracing::info!("Using public TURN server: {:?}", turn.urls);
+                                turn_servers.push(turn);
+                            }
+                        } else {
+                            tracing::info!(
+                                "No public ICE servers configured, using host candidates only"
+                            );
+                        }
+                    } else {
+                        if let Some(ref stun) = config.stream.stun_server {
+                            if !stun.is_empty() {
+                                stun_servers.push(stun.clone());
+                                tracing::info!("Using custom STUN server: {}", stun);
+                            }
+                        }
+                        if let Some(ref turn) = config.stream.turn_server {
+                            if !turn.is_empty() {
+                                let username = config.stream.turn_username.clone().unwrap_or_default();
+                                let credential =
+                                    config.stream.turn_password.clone().unwrap_or_default();
+                                turn_servers.push(one_kvm::webrtc::config::TurnServer::new(
+                                    turn.clone(),
+                                    username.clone(),
+                                    credential,
+                                ));
+                                tracing::info!(
+                                    "Using custom TURN server: {} (user: {})",
+                                    turn,
+                                    username
+                                );
+                            }
+                        }
+                    }
+
+                    one_kvm::webrtc::config::WebRtcConfig {
+                        stun_servers,
+                        turn_servers,
+                        ..Default::default()
+                    }
+                },
+                ..Default::default()
+            };
+            WebRtcStreamer::with_config(webrtc_config)
+        };
+        tracing::info!("WebRTC streamer created (supports H264, extensible to VP8/VP9/H265)");
+
+        webrtc_streamer.set_hid_controller(hid.clone()).await;
+        webrtc_streamer.set_audio_controller(audio.clone()).await;
+        if config.audio.enabled {
+            if let Err(e) = webrtc_streamer.set_audio_enabled(true).await {
+                tracing::warn!("Failed to enable WebRTC audio: {}", e);
+            } else {
+                tracing::info!("WebRTC audio enabled");
+            }
+        }
+
+        let (device_path, actual_resolution, actual_format, actual_fps, jpeg_quality) =
+            streamer.current_capture_config().await;
+        tracing::info!(
+            "Initial video config: {}x{} {:?} @ {}fps",
+            actual_resolution.width,
+            actual_resolution.height,
+            actual_format,
+            actual_fps
+        );
+        webrtc_streamer
+            .update_video_config(actual_resolution, actual_format, actual_fps)
+            .await;
+        if let Some(device_path) = device_path {
+            webrtc_streamer
+                .set_capture_device(device_path, jpeg_quality)
+                .await;
+            tracing::info!("WebRTC streamer configured for direct capture");
+        } else {
+            tracing::warn!("No capture device configured for WebRTC");
+        }
+
+        let sm =
+            VideoStreamManager::with_webrtc_streamer(streamer.clone(), webrtc_streamer.clone());
+        sm.set_event_bus(events.clone()).await;
+        sm.set_config_store(config_store.clone()).await;
+
+        let initial_mode = config.stream.mode.clone();
+        if let Err(e) = sm.init_with_mode(initial_mode.clone()).await {
             tracing::warn!(
-                "Failed to initialize video with config: {}, will auto-detect",
+                "Failed to initialize stream manager with mode {:?}: {}",
+                initial_mode,
                 e
             );
         } else {
             tracing::info!(
-                "Video configured: {} @ {}x{} {}",
-                device_path,
-                video_resolution.width,
-                video_resolution.height,
-                video_format
+                "Video stream manager initialized with mode: {:?}",
+                initial_mode
             );
         }
-    }
-
-    // Create WebRTC streamer
-    let webrtc_streamer = {
-        let webrtc_config = WebRtcStreamerConfig {
-            resolution: video_resolution,
-            input_format: video_format,
-            fps: config.video.fps,
-            bitrate_preset: config.stream.bitrate_preset,
-            encoder_backend: config.stream.encoder.to_backend(),
-            webrtc: {
-                let mut stun_servers = vec![];
-                let mut turn_servers = vec![];
-
-                // Check if user configured custom servers
-                let has_custom_stun = config
-                    .stream
-                    .stun_server
-                    .as_ref()
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
-                let has_custom_turn = config
-                    .stream
-                    .turn_server
-                    .as_ref()
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
-
-                // If no custom servers, use public ICE servers (like RustDesk)
-                if !has_custom_stun && !has_custom_turn {
-                    use one_kvm::webrtc::config::public_ice;
-                    if public_ice::is_configured() {
-                        if let Some(stun) = public_ice::stun_server() {
-                            stun_servers.push(stun.clone());
-                            tracing::info!("Using public STUN server: {}", stun);
-                        }
-                        for turn in public_ice::turn_servers() {
-                            tracing::info!("Using public TURN server: {:?}", turn.urls);
-                            turn_servers.push(turn);
-                        }
-                    } else {
-                        tracing::info!(
-                            "No public ICE servers configured, using host candidates only"
-                        );
-                    }
-                } else {
-                    // Use custom servers
-                    if let Some(ref stun) = config.stream.stun_server {
-                        if !stun.is_empty() {
-                            stun_servers.push(stun.clone());
-                            tracing::info!("Using custom STUN server: {}", stun);
-                        }
-                    }
-                    if let Some(ref turn) = config.stream.turn_server {
-                        if !turn.is_empty() {
-                            let username = config.stream.turn_username.clone().unwrap_or_default();
-                            let credential =
-                                config.stream.turn_password.clone().unwrap_or_default();
-                            turn_servers.push(one_kvm::webrtc::config::TurnServer::new(
-                                turn.clone(),
-                                username.clone(),
-                                credential,
-                            ));
-                            tracing::info!(
-                                "Using custom TURN server: {} (user: {})",
-                                turn,
-                                username
-                            );
-                        }
-                    }
-                }
-
-                one_kvm::webrtc::config::WebRtcConfig {
-                    stun_servers,
-                    turn_servers,
-                    ..Default::default()
-                }
-            },
-            ..Default::default()
-        };
-        WebRtcStreamer::with_config(webrtc_config)
-    };
-    tracing::info!("WebRTC streamer created (supports H264, extensible to VP8/VP9/H265)");
-
-    // Create OTG Service (single instance for centralized USB gadget management)
-    let otg_service = Arc::new(OtgService::new());
-    tracing::info!("OTG Service created");
-
-    // Reconcile OTG once from the persisted config so controllers only consume its result.
-    if let Err(e) = otg_service.apply_config(&config.hid, &config.msd).await {
-        tracing::warn!("Failed to apply OTG config: {}", e);
-    }
-
-    // Create HID controller based on config
-    let hid_backend = match config.hid.backend {
-        config::HidBackend::Otg => HidBackendType::Otg,
-        config::HidBackend::Ch9329 => HidBackendType::Ch9329 {
-            port: config.hid.ch9329_port.clone(),
-            baud_rate: config.hid.ch9329_baudrate,
-        },
-        config::HidBackend::None => HidBackendType::None,
-    };
-    let hid = Arc::new(HidController::new(
-        hid_backend,
-        Some(otg_service.clone()), // Always pass OtgService to support hot-reload to OTG
-    ));
-    hid.set_event_bus(events.clone()).await;
-    if let Err(e) = hid.init().await {
-        tracing::warn!("Failed to initialize HID backend: {}", e);
-    }
-
-    // Create MSD controller (optional, based on config)
-    let msd = if config.msd.enabled {
-        // Initialize Ventoy resources from data directory
-        let ventoy_resource_dir = ventoy_img::get_resource_dir(&data_dir);
-        if ventoy_resource_dir.exists() {
-            if let Err(e) = ventoy_img::init_resources(&ventoy_resource_dir) {
-                tracing::warn!("Failed to initialize Ventoy resources: {}", e);
-                tracing::info!(
-                    "Ventoy resource files should be placed in: {}",
-                    ventoy_resource_dir.display()
-                );
-                tracing::info!("Required files: {:?}", ventoy_img::required_files());
-            } else {
-                tracing::info!(
-                    "Ventoy resources initialized from {}",
-                    ventoy_resource_dir.display()
-                );
-            }
-        } else {
-            tracing::warn!(
-                "Ventoy resource directory not found: {}",
-                ventoy_resource_dir.display()
-            );
-            tracing::info!(
-                "Create the directory and place the following files: {:?}",
-                ventoy_img::required_files()
-            );
-        }
-
-        let controller = MsdController::new(otg_service.clone(), config.msd.msd_dir_path());
-        if let Err(e) = controller.init().await {
-            tracing::warn!("Failed to initialize MSD controller: {}", e);
-            None
-        } else {
-            controller.set_event_bus(events.clone()).await;
-            Some(controller)
-        }
-    } else {
-        tracing::info!("MSD disabled in configuration");
-        None
+        sm
     };
 
-    // Create ATX controller (optional, based on config)
-    let atx = if config.atx.enabled {
-        let controller_config = config.atx.to_controller_config();
-        let controller = AtxController::new(controller_config);
-
-        if let Err(e) = controller.init().await {
-            tracing::warn!("Failed to initialize ATX controller: {}", e);
-            None
-        } else {
-            Some(controller)
+    #[cfg(not(feature = "hwencode"))]
+    let stream_manager = {
+        let sm = VideoStreamManager::new();
+        sm.set_event_bus(events.clone()).await;
+        sm.set_config_store(config_store.clone()).await;
+        if let Err(e) = sm.init_with_mode(config.stream.mode.clone()).await {
+            tracing::warn!("Failed to initialize stream manager: {}", e);
         }
-    } else {
-        tracing::info!("ATX disabled in configuration");
-        None
+        sm
     };
-
-    // Create Audio controller
-    let audio = {
-        let audio_config = AudioControllerConfig {
-            enabled: config.audio.enabled,
-            device: config.audio.device.clone(),
-            quality: AudioQuality::from_str(&config.audio.quality),
-        };
-
-        let controller = AudioController::new(audio_config);
-        controller.set_event_bus(events.clone()).await;
-
-        if config.audio.enabled {
-            tracing::info!(
-                "Audio enabled: {}, quality={}",
-                config.audio.device,
-                config.audio.quality
-            );
-            // Start audio streaming so WebRTC can subscribe to Opus frames
-            if let Err(e) = controller.start_streaming().await {
-                tracing::warn!("Failed to start audio streaming: {}", e);
-            }
-        } else {
-            tracing::info!("Audio disabled in configuration");
-        }
-
-        Arc::new(controller)
-    };
-
-    // Create Extension manager (ttyd, gostc, easytier)
-    let extensions = Arc::new(ExtensionManager::new());
-    tracing::info!("Extension manager initialized");
-
-    // Wire up WebRTC streamer with HID controller
-    // This enables WebRTC DataChannel to process HID events
-    webrtc_streamer.set_hid_controller(hid.clone()).await;
-
-    // Wire up WebRTC streamer with Audio controller
-    // This enables WebRTC audio track to receive Opus frames
-    webrtc_streamer.set_audio_controller(audio.clone()).await;
-    if config.audio.enabled {
-        if let Err(e) = webrtc_streamer.set_audio_enabled(true).await {
-            tracing::warn!("Failed to enable WebRTC audio: {}", e);
-        } else {
-            tracing::info!("WebRTC audio enabled");
-        }
-    }
-
-    // Configure direct capture for WebRTC encoder pipeline
-    let (device_path, actual_resolution, actual_format, actual_fps, jpeg_quality) =
-        streamer.current_capture_config().await;
-    tracing::info!(
-        "Initial video config: {}x{} {:?} @ {}fps",
-        actual_resolution.width,
-        actual_resolution.height,
-        actual_format,
-        actual_fps
-    );
-    webrtc_streamer
-        .update_video_config(actual_resolution, actual_format, actual_fps)
-        .await;
-    if let Some(device_path) = device_path {
-        webrtc_streamer
-            .set_capture_device(device_path, jpeg_quality)
-            .await;
-        tracing::info!("WebRTC streamer configured for direct capture");
-    } else {
-        tracing::warn!("No capture device configured for WebRTC");
-    }
-
-    // Create video stream manager (unified MJPEG/WebRTC management)
-    // Use with_webrtc_streamer to ensure we use the same WebRtcStreamer instance
-    let stream_manager =
-        VideoStreamManager::with_webrtc_streamer(streamer.clone(), webrtc_streamer.clone());
-    stream_manager.set_event_bus(events.clone()).await;
-    stream_manager.set_config_store(config_store.clone()).await;
-
-    // Initialize stream manager with configured mode
-    let initial_mode = config.stream.mode.clone();
-    if let Err(e) = stream_manager.init_with_mode(initial_mode.clone()).await {
-        tracing::warn!(
-            "Failed to initialize stream manager with mode {:?}: {}",
-            initial_mode,
-            e
-        );
-    } else {
-        tracing::info!(
-            "Video stream manager initialized with mode: {:?}",
-            initial_mode
-        );
-    }
 
     // Create RustDesk service (optional, based on config)
+    #[cfg(feature = "hwencode")]
     let rustdesk = if config.rustdesk.is_valid() {
         tracing::info!(
             "Initializing RustDesk service: ID={} -> {}",
@@ -545,7 +437,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    #[cfg(not(feature = "hwencode"))]
+    let rustdesk: Option<()> = None;
+
     // Create RTSP service (optional, based on config)
+    #[cfg(feature = "hwencode")]
     let rtsp = if config.rtsp.enabled {
         tracing::info!(
             "Initializing RTSP service: rtsp://{}:{}/{}",
@@ -560,6 +456,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    #[cfg(not(feature = "hwencode"))]
+    let rtsp: Option<()> = None;
+
     // Create application state
     let update_service = Arc::new(UpdateService::new(data_dir.join("updates")));
 
@@ -573,8 +472,10 @@ async fn main() -> anyhow::Result<()> {
         msd,
         atx,
         audio,
-        rustdesk.clone(),
-        rtsp.clone(),
+        #[cfg(feature = "hwencode")]
+        rustdesk,
+        #[cfg(feature = "hwencode")]
+        rtsp,
         extensions.clone(),
         events.clone(),
         update_service,
