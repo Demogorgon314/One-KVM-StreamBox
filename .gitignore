@@ -42,3 +42,4 @@ secrets.toml
 .env
 /docs/
 web/package-lock.json
+vendor/
