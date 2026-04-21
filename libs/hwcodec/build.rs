@@ -364,11 +364,11 @@ mod ffmpeg {
 
         builder.file(ffmpeg_ram_dir.join("ffmpeg_ram_encode.cpp"));
 
-        // RKMPP decode only exists on ARM builds where FFmpeg is compiled with RKMPP support.
-        // Avoid compiling this file on x86/x64 where `AV_HWDEVICE_TYPE_RKMPP` doesn't exist.
         let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-        let enable_rkmpp = matches!(target_arch.as_str(), "aarch64" | "arm")
-            || std::env::var_os("CARGO_FEATURE_RKMPP").is_some();
+        let is_aml = std::env::var_os("CARGO_FEATURE_AML").is_some();
+        let enable_rkmpp = !is_aml
+            && (matches!(target_arch.as_str(), "aarch64" | "arm")
+                || std::env::var_os("CARGO_FEATURE_RKMPP").is_some());
         if enable_rkmpp {
             builder.file(ffmpeg_ram_dir.join("ffmpeg_ram_decode.cpp"));
         } else {
