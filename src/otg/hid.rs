@@ -72,32 +72,48 @@ impl HidFunctionType {
 }
 
 #[derive(Debug, Clone)]
+/// HID Function for USB Gadget
+///
+/// On Amlogic kernels, ConfigFS HID function directories must use
+/// well-known names (`hid.keyboard`, `hid.mouse`) rather than the
+/// generic `hid.usb{N}` convention.  This struct stores both the
+/// ConfigFS function name and the device-node index separately so
+/// that the two can diverge when needed.
 pub struct HidFunction {
+    /// Minor device index → /dev/hidg{instance}
     instance: u8,
     func_type: HidFunctionType,
+    /// ConfigFS function directory name (e.g. `hid.keyboard`, `hid.mouse`)
     name: String,
     keyboard_leds: bool,
 }
 
 impl HidFunction {
+    /// Create a keyboard function → ConfigFS name `hid.keyboard`
     pub fn keyboard(instance: u8, keyboard_leds: bool) -> Self {
         Self {
             instance,
             func_type: HidFunctionType::Keyboard,
-            name: format!("hid.usb{}", instance),
+            name: "hid.keyboard".to_string(),
             keyboard_leds,
         }
     }
 
+    /// Create a relative mouse function → ConfigFS name `hid.mouse`
     pub fn mouse_relative(instance: u8) -> Self {
         Self {
             instance,
             func_type: HidFunctionType::MouseRelative,
-            name: format!("hid.usb{}", instance),
+            name: "hid.mouse".to_string(),
             keyboard_leds: false,
         }
     }
 
+    /// Create an absolute mouse function
+    ///
+    /// Not supported on Amlogic kernels (no `hid.absolute_mouse`
+    /// ConfigFS function).  Still uses `hid.usb{N}` naming so that
+    /// creation will explicitly fail on kernels that lack it.
     pub fn mouse_absolute(instance: u8) -> Self {
         Self {
             instance,
@@ -107,6 +123,11 @@ impl HidFunction {
         }
     }
 
+    /// Create a consumer control function
+    ///
+    /// Not supported on Amlogic kernels (no `hid.consumer`
+    /// ConfigFS function).  Still uses `hid.usb{N}` naming so that
+    /// creation will explicitly fail on kernels that lack it.
     pub fn consumer_control(instance: u8) -> Self {
         Self {
             instance,
@@ -210,10 +231,11 @@ mod tests {
     #[test]
     fn test_hid_function_names() {
         let kb = HidFunction::keyboard(0, false);
-        assert_eq!(kb.name(), "hid.usb0");
+        assert_eq!(kb.name(), "hid.keyboard");
         assert_eq!(kb.device_path(), PathBuf::from("/dev/hidg0"));
 
         let mouse = HidFunction::mouse_relative(1);
-        assert_eq!(mouse.name(), "hid.usb1");
+        assert_eq!(mouse.name(), "hid.mouse");
+        assert_eq!(mouse.device_path(), PathBuf::from("/dev/hidg1"));
     }
 }

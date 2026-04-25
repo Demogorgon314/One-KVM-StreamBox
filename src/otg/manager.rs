@@ -332,7 +332,7 @@ impl OtgGadgetManager {
                 Some(n) => n,
                 None => continue,
             };
-            if !name.contains(".usb") {
+            if !name.contains(".usb") && !name.starts_with("hid.") {
                 continue;
             }
 

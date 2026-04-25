@@ -244,6 +244,16 @@ pub async fn apply_msd_config(
         tracing::warn!("Failed to create MSD ventoy directory: {}", e);
     }
 
+    // On Amlogic platforms, MSD must remain disabled because the
+    // kernel's usb_f_mass_storage driver panics on USB enumeration.
+    #[cfg(feature = "aml")]
+    {
+        if new_config.enabled {
+            tracing::warn!("MSD cannot be enabled on Amlogic platforms (kernel panic risk), ignoring");
+            return Ok(());
+        }
+    }
+
     let needs_reload = options.force || old_msd_enabled != new_msd_enabled || msd_dir_changed;
     if !needs_reload {
         tracing::info!(
