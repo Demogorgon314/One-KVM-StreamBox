@@ -431,6 +431,12 @@ pub struct MsdConfig {
 impl Default for MsdConfig {
     fn default() -> Self {
         Self {
+            // MSD is disabled by default on Amlogic because the
+            // mass_storage gadget function panics the kernel on
+            // USB enumeration without a backing image.
+            #[cfg(feature = "aml")]
+            enabled: false,
+            #[cfg(not(feature = "aml"))]
             enabled: true,
             msd_dir: String::new(),
         }
@@ -524,9 +530,9 @@ impl Default for AudioConfig {
 #[derive(Default)]
 pub enum StreamMode {
     /// WebRTC with H264/H265
+    #[default]
     WebRTC,
     /// MJPEG over HTTP
-    #[default]
     Mjpeg,
 }
 
@@ -675,7 +681,7 @@ pub struct StreamConfig {
 impl Default for StreamConfig {
     fn default() -> Self {
         Self {
-            mode: StreamMode::Mjpeg,
+            mode: StreamMode::WebRTC,
             encoder: EncoderType::Auto,
             bitrate_preset: BitratePreset::Balanced,
             // Empty means use public ICE servers (like RustDesk)

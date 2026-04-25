@@ -402,7 +402,7 @@ fn get_network_addresses() -> Vec<NetworkAddress> {
                 }
             } else if let Some(sockaddr_in6) = addr.as_sockaddr_in6() {
                 let ip = sockaddr_in6.ip();
-                if ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() {
+                if ip.is_loopback() || ip.is_unspecified() {
                     continue;
                 }
                 let ip_str = ip.to_string();
@@ -590,6 +590,7 @@ pub struct SetupRequest {
     pub video_width: Option<u32>,
     pub video_height: Option<u32>,
     pub video_fps: Option<u32>,
+    pub encoder_backend: Option<String>,
     // Audio settings
     pub audio_device: Option<String>,
     // HID settings
@@ -610,6 +611,25 @@ pub async fn setup_init(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SetupRequest>,
 ) -> Result<Json<LoginResponse>> {
+    fn parse_encoder_type(value: &str) -> crate::config::EncoderType {
+        match value.to_ascii_lowercase().as_str() {
+            "software" => crate::config::EncoderType::Software,
+            "vaapi" => crate::config::EncoderType::Vaapi,
+            "nvenc" => crate::config::EncoderType::Nvenc,
+            "qsv" => crate::config::EncoderType::Qsv,
+            "amf" => crate::config::EncoderType::Amf,
+            "rkmpp" => crate::config::EncoderType::Rkmpp,
+            "v4l2m2m" => crate::config::EncoderType::V4l2m2m,
+            "aml" | "amlvenc" => crate::config::EncoderType::Aml,
+            _ => crate::config::EncoderType::Auto,
+        }
+    }
+
+    #[cfg(feature = "aml")]
+    let default_encoder = crate::config::EncoderType::Aml;
+    #[cfg(not(feature = "aml"))]
+    let default_encoder = crate::config::EncoderType::Auto;
+
     // Check if already initialized
     if state.config.is_initialized() {
         return Err(AppError::BadRequest("Already initialized".to_string()));
@@ -637,6 +657,12 @@ pub async fn setup_init(
         .config
         .update(|config| {
             config.initialized = true;
+            config.stream.mode = crate::config::StreamMode::WebRTC;
+            config.stream.encoder = req
+                .encoder_backend
+                .as_deref()
+                .map(parse_encoder_type)
+                .unwrap_or(default_encoder.clone());
 
             // Video settings
             if let Some(device) = req.video_device.clone() {
@@ -689,8 +715,16 @@ pub async fn setup_init(
             if let Some(enabled) = req.hid_otg_keyboard_leds {
                 config.hid.otg_keyboard_leds = enabled;
             }
+            // On Amlogic platforms, MSD must remain disabled because the
+            // kernel's usb_f_mass_storage driver panics on USB enumeration.
+            // The user can still see MSD in the UI but it cannot be enabled.
+            #[cfg(not(feature = "aml"))]
             if let Some(enabled) = req.msd_enabled {
                 config.msd.enabled = enabled;
+            }
+            #[cfg(feature = "aml")]
+            {
+                config.msd.enabled = false;
             }
 
             // Extension settings
@@ -2571,11 +2605,11 @@ pub async fn hid_otg_self_check(State(state): State<Arc<AppState>>) -> Json<OtgS
         let functions_path = one_kvm_path.join("functions");
         let function_names = list_dir_names(&functions_path)
             .into_iter()
-            .filter(|name| name.contains(".usb"))
+            .filter(|name| name.contains(".usb") || name.starts_with("hid."))
             .collect::<Vec<_>>();
         let hid_functions = function_names
             .iter()
-            .filter(|name| name.starts_with("hid.usb"))
+            .filter(|name| name.starts_with("hid."))
             .cloned()
             .collect::<Vec<_>>();
         if hid_functions.is_empty() {
@@ -2628,7 +2662,7 @@ pub async fn hid_otg_self_check(State(state): State<Arc<AppState>>) -> Json<OtgS
 
             let linked_functions = list_dir_names(&config_path)
                 .into_iter()
-                .filter(|name| name.contains(".usb"))
+                .filter(|name| name.contains(".usb") || name.starts_with("hid."))
                 .collect::<Vec<_>>();
             let missing_links = function_names
                 .iter()
@@ -2662,7 +2696,15 @@ pub async fn hid_otg_self_check(State(state): State<Arc<AppState>>) -> Json<OtgS
         let missing_hid_devices = hid_functions
             .iter()
             .filter_map(|name| {
-                let index = name.strip_prefix("hid.usb")?.parse::<u8>().ok()?;
+                let index: u8 = if let Some(idx) = name.strip_prefix("hid.usb") {
+                    idx.parse().ok()?
+                } else if name == "hid.keyboard" {
+                    0
+                } else if name == "hid.mouse" {
+                    1
+                } else {
+                    return None;
+                };
                 let dev_path = std::path::PathBuf::from(format!("/dev/hidg{}", index));
                 if dev_path.exists() {
                     None
