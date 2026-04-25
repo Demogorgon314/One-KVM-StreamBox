@@ -457,10 +457,10 @@ impl OtgBackend {
 
     /// Check if all HID device files exist
     pub fn check_devices_exist(&self) -> bool {
-        self.keyboard_path.as_ref().is_none_or(|p| p.exists())
-            && self.mouse_rel_path.as_ref().is_none_or(|p| p.exists())
-            && self.mouse_abs_path.as_ref().is_none_or(|p| p.exists())
-            && self.consumer_path.as_ref().is_none_or(|p| p.exists())
+        self.keyboard_path.as_ref().map_or(true, |p| p.exists())
+            && self.mouse_rel_path.as_ref().map_or(true, |p| p.exists())
+            && self.mouse_abs_path.as_ref().map_or(true, |p| p.exists())
+            && self.consumer_path.as_ref().map_or(true, |p| p.exists())
     }
 
     /// Get list of missing device paths

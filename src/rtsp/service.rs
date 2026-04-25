@@ -491,8 +491,8 @@ async fn stream_video_interleaved(
         RtspCodec::H264 => 96,
         RtspCodec::H265 => 99,
     };
-    let mut sequence_number: u16 = rand::rng().random();
-    let ssrc: u32 = rand::rng().random();
+    let mut sequence_number: u16 = rand::thread_rng().gen();
+    let ssrc: u32 = rand::thread_rng().gen();
 
     let mut h264_payloader = rtp::codecs::h264::H264Payloader::default();
     let mut h265_payloader = H265Payloader::new();
@@ -1155,8 +1155,8 @@ fn monotonic_rtp_timestamp(pts_ms: i64, last: &mut u32, frame_duration: Duration
 }
 
 fn generate_session_id() -> String {
-    let mut rng = rand::rng();
-    let value: u64 = rng.random();
+    let mut rng = rand::thread_rng();
+    let value: u64 = rng.gen();
     format!("{:016x}", value)
 }
 

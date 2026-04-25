@@ -16,6 +16,7 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -339,6 +340,7 @@ impl UniversalSession {
                 urls: turn.urls.clone(),
                 username: turn.username.clone(),
                 credential: turn.credential.clone(),
+                credential_type: RTCIceCredentialType::Password,
             });
         }
 
@@ -671,7 +673,7 @@ impl UniversalSession {
 
                         // Debug log for H265 frames
                         if expected_codec == VideoEncoderType::H265
-                                && (encoded_frame.is_keyframe || frames_sent.is_multiple_of(30)) {
+                                && (encoded_frame.is_keyframe || frames_sent % 30 == 0) {
                                 debug!(
                                     "[Session-H265] Received frame #{}: size={}, keyframe={}, seq={}",
                                     frames_sent,
@@ -819,7 +821,7 @@ impl UniversalSession {
                         // 20ms at 48kHz = 960 samples
                         let samples = 960u32;
                         if let Err(e) = audio_track.write_packet(&opus_frame.data, samples).await {
-                            if packets_sent.is_multiple_of(100) {
+                            if packets_sent % 100 == 0 {
                                 debug!("Failed to write audio packet: {}", e);
                             }
                         } else {

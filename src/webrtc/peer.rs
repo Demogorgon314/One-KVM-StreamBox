@@ -12,6 +12,7 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -93,6 +94,7 @@ impl PeerConnection {
                 urls: turn.urls.clone(),
                 username: turn.username.clone(),
                 credential: turn.credential.clone(),
+                credential_type: RTCIceCredentialType::Password,
             });
         }
 

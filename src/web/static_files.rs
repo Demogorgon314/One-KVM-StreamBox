@@ -11,11 +11,11 @@ use std::sync::OnceLock;
 
 // Only embed assets in release mode
 #[cfg(not(debug_assertions))]
-use rust_embed::Embed;
+use rust_embed::RustEmbed;
 
 #[cfg(not(debug_assertions))]
 /// Embedded static assets (frontend files) - only in release mode
-#[derive(Embed)]
+#[derive(RustEmbed)]
 #[folder = "web/dist"]
 #[prefix = ""]
 pub struct StaticAssets;
@@ -47,7 +47,7 @@ where
 {
     Router::new()
         .route("/", get(index_handler))
-        .route("/{*path}", get(static_handler))
+        .route("/*path", get(static_handler))
 }
 
 /// Serve index.html for root path

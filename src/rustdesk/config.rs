@@ -164,8 +164,8 @@ impl RustDeskConfig {
 /// Generate a random 9-digit device ID
 pub fn generate_device_id() -> String {
     use rand::Rng;
-    let mut rng = rand::rng();
-    let id: u32 = rng.random_range(100_000_000..999_999_999);
+    let mut rng = rand::thread_rng();
+    let id: u32 = rng.gen_range(100_000_000..999_999_999);
     id.to_string()
 }
 
@@ -173,10 +173,10 @@ pub fn generate_device_id() -> String {
 pub fn generate_random_password() -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::rng();
+    let mut rng = rand::thread_rng();
     (0..8)
         .map(|_| {
-            let idx = rng.random_range(0..CHARSET.len());
+            let idx = rng.gen_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect()

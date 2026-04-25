@@ -1,4 +1,4 @@
-use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint};
 
 pub type VlCodecHandle = c_long;
 
@@ -138,13 +138,14 @@ pub struct VlEncodeInfo {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct VlDmaInfo {
     pub shared_fd: [c_int; 3],
     pub num_planes: c_uint,
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub union VlBufInfoU {
     pub dma_info: VlDmaInfo,
     pub in_ptr: [std::os::raw::c_ulong; 3],
@@ -152,7 +153,7 @@ pub union VlBufInfoU {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy)]
 pub struct VlBufferInfo {
     pub buf_type: VlBufferType,
     pub buf_info: VlBufInfoU,

@@ -446,8 +446,8 @@ impl UniversalVideoTrack {
             let is_last = i == num_payloads - 1;
 
             // Build RTP packet
-            let packet = rtp::packet::Packet {
-                header: rtp::header::Header {
+            let packet = webrtc::rtp::packet::Packet {
+                header: webrtc::rtp::header::Header {
                     version: 2,
                     padding: false,
                     extension: false,

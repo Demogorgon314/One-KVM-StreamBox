@@ -137,7 +137,7 @@ const openMobilePaste = () => openFromOverflow(() => {
         <!-- Video Config - Always visible -->
         <VideoConfigPopover
           v-model:open="videoPopoverOpen"
-          :video-mode="props.videoMode || 'mjpeg'"
+          :video-mode="props.videoMode || 'h264'"
           @update:video-mode="emit('update:videoMode', $event)"
         />
 

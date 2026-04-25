@@ -85,7 +85,7 @@ impl IntoResponse for AppError {
         };
 
         tracing::error!(
-            error_type = std::any::type_name_of_val(&self),
+            error_type = std::any::type_name::<Self>(),
             error_message = %body.message,
             "Request failed"
         );

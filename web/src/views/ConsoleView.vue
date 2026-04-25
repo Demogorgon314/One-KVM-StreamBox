@@ -85,7 +85,7 @@ const consoleEvents = useConsoleEvents({
 })
 
 // Video mode state
-const videoMode = ref<VideoMode>('mjpeg')
+const videoMode = ref<VideoMode>('h264')
 
 // Video state
 const videoRef = ref<HTMLImageElement | null>(null)
@@ -2537,6 +2537,7 @@ onUnmounted(() => {
           <!-- MJPEG Stream -->
           <img
             v-show="videoMode === 'mjpeg'"
+            data-testid="mjpeg-stream"
             ref="videoRef"
             :src="mjpegUrl"
             class="w-full h-full object-contain"
@@ -2549,6 +2550,7 @@ onUnmounted(() => {
           <!-- Note: muted is controlled by unifiedAudio, not hardcoded -->
           <video
             v-show="videoMode !== 'mjpeg'"
+            data-testid="webrtc-stream"
             ref="webrtcVideoRef"
             class="w-full h-full object-contain"
             autoplay

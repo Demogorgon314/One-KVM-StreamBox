@@ -131,6 +131,7 @@ const statusBadgeText = computed(() => {
       <!-- New layout: vertical with title on top, status+quickInfo on bottom -->
       <button
         type="button"
+        :data-testid="`${type}-status-card`"
         :aria-label="`${title}: ${quickInfo || subtitle || statusText}`"
         :class="cn(
           'flex flex-col gap-0.5 rounded-md border cursor-pointer transition-colors text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
@@ -230,6 +231,7 @@ const statusBadgeText = computed(() => {
       <!-- New layout: vertical with title on top, status+quickInfo on bottom -->
       <button
         type="button"
+        :data-testid="`${type}-status-card`"
         :aria-label="`${title}: ${quickInfo || subtitle || statusText}`"
         :class="cn(
           'flex flex-col gap-0.5 rounded-md border cursor-pointer transition-colors text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',

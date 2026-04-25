@@ -50,6 +50,8 @@ pub struct VfmcapFrame {
     pub priv_: *mut c_void,
 }
 
+unsafe impl Send for VfmcapFrame {}
+
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct VfmcapSignalInfo {

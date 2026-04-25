@@ -5,18 +5,30 @@ pub mod codec_constraints;
 pub mod convert;
 #[cfg(feature = "hwencode")]
 pub mod decoder;
-#[cfg(feature = "hwencode")]
+#[cfg(all(feature = "hwencode", feature = "v4l2"))]
+#[path = "device.rs"]
+pub mod device;
+#[cfg(all(feature = "hwencode", feature = "aml", not(feature = "v4l2")))]
+#[path = "device_aml.rs"]
 pub mod device;
 pub mod encoder;
 pub mod format;
 #[cfg(feature = "hwencode")]
 pub mod frame;
-#[cfg(feature = "hwencode")]
+#[cfg(all(feature = "hwencode", feature = "v4l2"))]
+#[path = "shared_video_pipeline.rs"]
+pub mod shared_video_pipeline;
+#[cfg(all(feature = "hwencode", feature = "aml", not(feature = "v4l2")))]
+#[path = "shared_video_pipeline_aml.rs"]
 pub mod shared_video_pipeline;
 pub mod stream_manager;
-#[cfg(feature = "hwencode")]
+#[cfg(all(feature = "hwencode", feature = "v4l2"))]
+#[path = "streamer.rs"]
 pub mod streamer;
-#[cfg(feature = "hwencode")]
+#[cfg(all(feature = "hwencode", feature = "aml", not(feature = "v4l2")))]
+#[path = "streamer_aml.rs"]
+pub mod streamer;
+#[cfg(all(feature = "hwencode", feature = "v4l2"))]
 pub mod v4l2r_capture;
 #[cfg(feature = "aml")]
 pub mod vfmcap_capture;

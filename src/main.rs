@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures::{stream::FuturesUnordered, StreamExt};
-use rustls::crypto::{ring, CryptoProvider};
+use rustls::crypto::ring;
 use tokio::sync::{broadcast, mpsc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -124,9 +124,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging with CLI arguments
     init_logging(args.log_level, args.verbose);
 
-    // Install default crypto provider (required by rustls 0.23+)
-    CryptoProvider::install_default(ring::default_provider())
-        .expect("Failed to install rustls crypto provider");
+    let _ = ring::default_provider();
 
     tracing::info!("Starting One-KVM v{}", env!("CARGO_PKG_VERSION"));
 
@@ -231,6 +229,54 @@ async fn main() -> anyhow::Result<()> {
     // Create event bus for real-time notifications
     let events = Arc::new(EventBus::new());
     tracing::info!("Event bus initialized");
+
+    let otg_service = Arc::new(OtgService::new());
+    if let Err(e) = otg_service.apply_config(&config.hid, &config.msd).await {
+        tracing::warn!("Failed to apply OTG config: {}", e);
+    }
+
+    let hid_backend = match config.hid.backend {
+        config::HidBackend::Otg => HidBackendType::Otg,
+        config::HidBackend::Ch9329 => HidBackendType::Ch9329 {
+            port: config.hid.ch9329_port.clone(),
+            baud_rate: config.hid.ch9329_baudrate,
+        },
+        config::HidBackend::None => HidBackendType::None,
+    };
+    let hid = Arc::new(HidController::new(hid_backend, Some(otg_service.clone())));
+    hid.set_event_bus(events.clone()).await;
+    if let Err(e) = hid.init().await {
+        tracing::warn!("Failed to initialize HID controller: {}", e);
+    }
+
+    let audio = Arc::new(AudioController::new(AudioControllerConfig {
+        enabled: config.audio.enabled,
+        device: config.audio.device.clone(),
+        quality: AudioQuality::from_str(&config.audio.quality),
+    }));
+    audio.set_event_bus(events.clone()).await;
+
+    let msd = if config.msd.enabled {
+        let controller = MsdController::new(otg_service.clone(), config.msd.msd_dir.clone());
+        if let Err(e) = controller.init().await {
+            tracing::warn!("Failed to initialize MSD controller: {}", e);
+        }
+        Some(controller)
+    } else {
+        None
+    };
+
+    let atx = if config.atx.enabled {
+        let controller = AtxController::new(config.atx.to_controller_config());
+        if let Err(e) = controller.init().await {
+            tracing::warn!("Failed to initialize ATX controller: {}", e);
+        }
+        Some(controller)
+    } else {
+        None
+    };
+
+    let extensions = Arc::new(ExtensionManager::new());
 
     // Parse video configuration once (avoid duplication)
     let (video_format, video_resolution) = parse_video_config(&config);
@@ -473,9 +519,9 @@ async fn main() -> anyhow::Result<()> {
         atx,
         audio,
         #[cfg(feature = "hwencode")]
-        rustdesk,
+        rustdesk.clone(),
         #[cfg(feature = "hwencode")]
-        rtsp,
+        rtsp.clone(),
         extensions.clone(),
         events.clone(),
         update_service,
@@ -594,7 +640,7 @@ async fn main() -> anyhow::Result<()> {
                 let cert = generate_self_signed_cert()?;
                 tokio::fs::create_dir_all(&cert_dir).await?;
                 tokio::fs::write(&cert_path, cert.cert.pem()).await?;
-                tokio::fs::write(&key_path, cert.signing_key.serialize_pem()).await?;
+                tokio::fs::write(&key_path, cert.key_pair.serialize_pem()).await?;
             } else {
                 tracing::info!("Using existing TLS certificate from {}", cert_dir.display());
             }
@@ -607,7 +653,7 @@ async fn main() -> anyhow::Result<()> {
             let local_addr = listener.local_addr()?;
             tracing::info!("Starting HTTPS server on {}", local_addr);
 
-            let server = axum_server::from_tcp_rustls(listener, tls_config.clone())?
+            let server = axum_server::from_tcp_rustls(listener, tls_config.clone())
                 .serve(app.clone().into_make_service());
             servers.push(server);
         }
@@ -824,7 +870,7 @@ fn parse_video_config(config: &AppConfig) -> (PixelFormat, Resolution) {
 }
 
 /// Generate a self-signed TLS certificate
-fn generate_self_signed_cert() -> anyhow::Result<rcgen::CertifiedKey<rcgen::KeyPair>> {
+fn generate_self_signed_cert() -> anyhow::Result<rcgen::CertifiedKey> {
     use rcgen::generate_simple_self_signed;
 
     let subject_alt_names = vec![

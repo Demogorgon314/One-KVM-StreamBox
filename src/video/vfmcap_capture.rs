@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 use std::io;
 use std::ptr;
+use tracing::info;
 
 use crate::error::{AppError, Result};
 use crate::ffi::vfmcap::*;
@@ -9,6 +10,7 @@ use crate::video::format::{PixelFormat, Resolution};
 
 pub struct VfmcapStream {
     ctx: *mut VfmcapCtx,
+    started: bool,
 }
 
 unsafe impl Send for VfmcapStream {}
@@ -32,8 +34,8 @@ pub struct VfmcapFrameData {
 }
 
 pub enum AcquireResult {
-    Frame(VfmcapFrameData),
-    Reconfigured(VfmcapFrameData),
+    Frame(VfmcapFrame),
+    Reconfigured(VfmcapFrame),
     Timeout,
     NoSignal,
 }
@@ -41,17 +43,19 @@ pub enum AcquireResult {
 impl VfmcapStream {
     pub fn open(device: &str, config: &VfmcapConfig) -> Result<Self> {
         let c_device = if device.is_empty() {
-            ptr::null()
+            None
         } else {
-            std::ffi::CString::new(device)
-                .map_err(|e| AppError::VideoError(format!("Invalid device path: {}", e)))?
+            Some(
+                std::ffi::CString::new(device)
+                    .map_err(|e| AppError::VideoError(format!("Invalid device path: {}", e)))?,
+            )
         };
         let ctx = unsafe {
             vfmcap_open(
-                if c_device.is_null() {
-                    ptr::null()
-                } else {
+                if let Some(ref c_device) = c_device {
                     c_device.as_ptr()
+                } else {
+                    ptr::null()
                 },
                 config,
             )
@@ -62,13 +66,20 @@ impl VfmcapStream {
                 last_error_safe(ptr::null_mut())
             )))
         } else {
-            Ok(Self { ctx })
+            Ok(Self {
+                ctx,
+                started: false,
+            })
         }
     }
 
     pub fn start(&mut self, num_buffers: u32) -> Result<()> {
+        if self.started {
+            return Ok(());
+        }
         let rc = unsafe { vfmcap_start(self.ctx, num_buffers) };
         if rc == VFMCAP_OK {
+            self.started = true;
             Ok(())
         } else {
             Err(AppError::VideoError(format!(
@@ -80,21 +91,19 @@ impl VfmcapStream {
     }
 
     pub fn stop(&mut self) {
-        unsafe { vfmcap_stop(self.ctx) };
+        if self.started {
+            unsafe { vfmcap_stop(self.ctx) };
+            self.started = false;
+            info!("vfmcap stopped");
+        }
     }
 
     pub fn acquire_frame(&mut self, timeout_ms: i32) -> Result<AcquireResult> {
         let mut frame: VfmcapFrame = unsafe { std::mem::zeroed() };
         let rc = unsafe { vfmcap_acquire_frame(self.ctx, &mut frame, timeout_ms) };
         match rc {
-            VFMCAP_OK => {
-                let data = frame_to_data(&frame);
-                Ok(AcquireResult::Frame(data))
-            }
-            VFMCAP_RECONFIGURED => {
-                let data = frame_to_data(&frame);
-                Ok(AcquireResult::Reconfigured(data))
-            }
+            VFMCAP_OK => Ok(AcquireResult::Frame(frame)),
+            VFMCAP_RECONFIGURED => Ok(AcquireResult::Reconfigured(frame)),
             VFMCAP_ERR_TIMEOUT => Ok(AcquireResult::Timeout),
             VFMCAP_ERR_NOSIG => Ok(AcquireResult::NoSignal),
             _ => Err(AppError::VideoError(format!(
@@ -126,6 +135,10 @@ impl VfmcapStream {
         unsafe { vfmcap_release_frame(self.ctx, &mut frame) };
     }
 
+    pub fn release_acquired_frame(&mut self, frame: &mut VfmcapFrame) {
+        unsafe { vfmcap_release_frame(self.ctx, frame) };
+    }
+
     pub fn poll_event(&mut self, timeout_ms: i32) -> i32 {
         unsafe { vfmcap_poll_event(self.ctx, timeout_ms) }
     }
@@ -152,7 +165,11 @@ impl VfmcapStream {
 impl Drop for VfmcapStream {
     fn drop(&mut self) {
         if !self.ctx.is_null() {
+            if self.started {
+                unsafe { vfmcap_stop(self.ctx) };
+            }
             unsafe { vfmcap_close(self.ctx) };
+            info!("vfmcap closed");
         }
     }
 }
@@ -160,6 +177,7 @@ impl Drop for VfmcapStream {
 pub struct AmlVfmcapCaptureStream {
     inner: VfmcapStream,
     pending_index: Option<u32>,
+    pending_frame: Option<VfmcapFrame>,
     resolution: Resolution,
     format: PixelFormat,
     num_buffers: u32,
@@ -175,7 +193,7 @@ impl AmlVfmcapCaptureStream {
         color_mode: VfmcapColorMode,
         num_buffers: u32,
     ) -> Result<Self> {
-        let config = VfmcapConfig {
+        let mut config = VfmcapConfig {
             output_format,
             target_width,
             target_height,
@@ -185,6 +203,27 @@ impl AmlVfmcapCaptureStream {
 
         let mut inner = VfmcapStream::open(device, &config)?;
         inner.start(num_buffers)?;
+
+        if output_format == VfmcapOutputFmt::Nv12 && color_mode == VfmcapColorMode::Passthrough {
+            if let Ok(info) = inner.signal_info() {
+                let detected_color_mode = match info.hdr_status {
+                    1 | 3 => VfmcapColorMode::Hdr10ToSdr,
+                    2 => VfmcapColorMode::HlgToSdr,
+                    _ => VfmcapColorMode::Passthrough,
+                };
+
+                if detected_color_mode != VfmcapColorMode::Passthrough {
+                    info!(
+                        "Reopening vfmcap with {:?} for hdr_status={} bitdepth={}",
+                        detected_color_mode, info.hdr_status, info.bitdepth
+                    );
+                    inner.stop();
+                    config.color_mode = detected_color_mode;
+                    inner = VfmcapStream::open(device, &config)?;
+                    inner.start(num_buffers)?;
+                }
+            }
+        }
 
         let resolution = if target_width > 0 && target_height > 0 {
             Resolution::new(target_width, target_height)
@@ -198,6 +237,7 @@ impl AmlVfmcapCaptureStream {
         Ok(Self {
             inner,
             pending_index: None,
+            pending_frame: None,
             resolution,
             format: PixelFormat::Nv12,
             num_buffers,
@@ -210,6 +250,14 @@ impl AmlVfmcapCaptureStream {
 
     pub fn poll_event(&mut self, timeout_ms: i32) -> i32 {
         self.inner.poll_event(timeout_ms)
+    }
+
+    fn release_pending(&mut self) {
+        if let Some(mut frame) = self.pending_frame.take() {
+            self.inner.release_acquired_frame(&mut frame);
+        } else if let Some(idx) = self.pending_index.take() {
+            self.inner.release_frame(idx);
+        }
     }
 }
 
@@ -231,10 +279,12 @@ impl CaptureStream for AmlVfmcapCaptureStream {
 
         let timeout_ms = 2000;
         match self.inner.acquire_frame(timeout_ms) {
-            Ok(AcquireResult::Frame(data)) => {
+            Ok(AcquireResult::Frame(frame)) => {
+                let data = frame_to_data(&frame);
                 let res = Resolution::new(data.width, data.height);
                 self.resolution = res;
                 self.pending_index = Some(data.index);
+                self.pending_frame = Some(frame);
                 Ok(CaptureResult {
                     frame: FrameData::DmaBuf(DmaBufFrame {
                         dmabuf_fd: data.dmabuf_fd,
@@ -252,10 +302,12 @@ impl CaptureStream for AmlVfmcapCaptureStream {
                     reconfigured: false,
                 })
             }
-            Ok(AcquireResult::Reconfigured(data)) => {
+            Ok(AcquireResult::Reconfigured(frame)) => {
+                let data = frame_to_data(&frame);
                 let res = Resolution::new(data.width, data.height);
                 self.resolution = res;
                 self.pending_index = Some(data.index);
+                self.pending_frame = Some(frame);
                 Ok(CaptureResult {
                     frame: FrameData::DmaBuf(DmaBufFrame {
                         dmabuf_fd: data.dmabuf_fd,
@@ -293,11 +345,21 @@ impl CaptureStream for AmlVfmcapCaptureStream {
 
     fn release_frame(&mut self, frame: &FrameData) {
         if let FrameData::DmaBuf(ref dma) = frame {
-            if let Some(idx) = self.pending_index.take() {
+            if let Some(mut native_frame) = self.pending_frame.take() {
+                self.inner.release_acquired_frame(&mut native_frame);
+                self.pending_index = None;
+            } else if let Some(idx) = self.pending_index.take() {
                 self.inner.release_frame(idx);
             }
             let _ = dma;
         }
+    }
+}
+
+impl Drop for AmlVfmcapCaptureStream {
+    fn drop(&mut self) {
+        self.release_pending();
+        self.inner.stop();
     }
 }
 

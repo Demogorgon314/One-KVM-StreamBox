@@ -162,14 +162,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/msd/drive/init", post(handlers::msd_drive_init))
         .route("/msd/drive/files", get(handlers::msd_drive_files))
         .route(
-            "/msd/drive/files/{*path}",
+            "/msd/drive/files/*path",
             get(handlers::msd_drive_download),
         )
         .route(
-            "/msd/drive/files/{*path}",
+            "/msd/drive/files/*path",
             delete(handlers::msd_drive_file_delete),
         )
-        .route("/msd/drive/mkdir/{*path}", post(handlers::msd_drive_mkdir))
+        .route("/msd/drive/mkdir/*path", post(handlers::msd_drive_mkdir))
         // ATX (Power Control) endpoints
         .route("/atx/status", get(handlers::atx_status))
         .route("/atx/power", post(handlers::atx_power))
@@ -208,7 +208,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/terminal", get(handlers::terminal::terminal_index))
         .route("/terminal/", get(handlers::terminal::terminal_index))
         .route("/terminal/ws", get(handlers::terminal::terminal_ws))
-        .route("/terminal/{*path}", get(handlers::terminal::terminal_proxy));
+        .route("/terminal/*path", get(handlers::terminal::terminal_proxy));
 
     // Protected routes (all authenticated users)
     let protected_routes = user_routes;
