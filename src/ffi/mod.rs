@@ -1,4 +1,4 @@
 #[cfg(feature = "aml")]
-mod vfmcap;
+pub(crate) mod vfmcap;
 #[cfg(feature = "aml")]
-mod multienc;
+pub(crate) mod multienc;

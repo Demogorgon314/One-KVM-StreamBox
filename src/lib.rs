@@ -7,6 +7,8 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod events;
+#[cfg(feature = "aml")]
+pub mod ffi;
 pub mod extensions;
 pub mod hid;
 pub mod msd;

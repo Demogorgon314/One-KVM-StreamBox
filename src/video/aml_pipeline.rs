@@ -20,12 +20,12 @@ use super::EncodedVideoFrame;
 const AUTO_STOP_GRACE_PERIOD_SECS: u64 = 3;
 const CAPTURE_TIMEOUT_STOP_THRESHOLD: u32 = 60;
 const ENCODE_ERROR_THROTTLE_SECS: u64 = 5;
-const VFMCAP_BUFFER_COUNT: u32 = 8;
+const VFMCAP_BUFFER_COUNT: u32 = 12;
 
 pub struct AmlPipelineConfig {
-    pub target_width: u32,
-    pub target_height: u32,
-    pub target_fps: f32,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: f32,
     pub color_mode: VfmcapColorMode,
     pub output_codec: VideoEncoderType,
     pub bitrate_kbps: u32,
@@ -38,14 +38,14 @@ pub struct AmlPipelineConfig {
 impl Default for AmlPipelineConfig {
     fn default() -> Self {
         Self {
-            target_width: 0,
-            target_height: 0,
-            target_fps: 0.0,
+            max_width: 3840,
+            max_height: 2160,
+            max_fps: 60.0,
             color_mode: VfmcapColorMode::Passthrough,
             output_codec: VideoEncoderType::H265,
             bitrate_kbps: 8000,
             gop: 30,
-            gop_pattern: 1,
+            gop_pattern: 5,
             rc_mode: 1,
             device: "/dev/video_cap".to_string(),
         }
@@ -145,13 +145,13 @@ impl AmlPipeline {
     fn run_capture_encode_loop(&self) {
         let config = &self.config;
 
-        // 1. Open capture stream
+        // 1. Open capture at native resolution (0 = native, no upscale/downscale)
         let mut capture = match AmlVfmcapCaptureStream::open(
             &config.device,
             VfmcapOutputFmt::Nv12,
-            config.target_width,
-            config.target_height,
-            config.target_fps,
+            0, // native resolution
+            0,
+            0.0, // native fps
             config.color_mode,
             VFMCAP_BUFFER_COUNT,
         ) {
@@ -164,32 +164,108 @@ impl AmlPipeline {
             }
         };
 
-        let resolution = capture.resolution();
+        let native_resolution = capture.resolution();
         info!(
-            "AML pipeline: capture opened {}x{}",
-            resolution.width, resolution.height
+            "AML pipeline: capture opened native {}x{}",
+            native_resolution.width, native_resolution.height
         );
 
-        // 2. Open encoder
+        // 2. If native resolution exceeds limit, re-open with limit to downscale
+        let actual_resolution = if config.max_width > 0
+            && config.max_height > 0
+            && (native_resolution.width > config.max_width
+                || native_resolution.height > config.max_height)
+        {
+            info!(
+                "AML pipeline: native {}x{} exceeds limit {}x{}, downscaling",
+                native_resolution.width, native_resolution.height,
+                config.max_width, config.max_height
+            );
+            capture = match AmlVfmcapCaptureStream::open(
+                &config.device,
+                VfmcapOutputFmt::Nv12,
+                config.max_width,
+                config.max_height,
+                config.max_fps,
+                config.color_mode,
+                VFMCAP_BUFFER_COUNT,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to re-open vfmcap for downscale: {}", e);
+                    self.running_flag.store(false, Ordering::Release);
+                    let _ = self.running.send(false);
+                    return;
+                }
+            };
+            let res = capture.resolution();
+            info!(
+                "AML pipeline: capture re-opened at {}x{} (downscaled)",
+                res.width, res.height
+            );
+            res
+        } else {
+            native_resolution
+        };
+
+        // Determine actual fps from signal info or config limit
+        let actual_fps = match capture.signal_info() {
+            Ok(info) if info.fps > 0 => {
+                let fps = if config.max_fps > 0.0 {
+                    info.fps.min(config.max_fps as u32)
+                } else {
+                    info.fps
+                };
+                info!("AML pipeline: signal fps={}, using fps={}", info.fps, fps);
+                fps
+            }
+            _ => {
+                let fps = if config.max_fps > 0.0 {
+                    config.max_fps as u32
+                } else {
+                    30
+                };
+                info!("AML pipeline: no signal fps, using fps={}", fps);
+                fps
+            }
+        };
+
+        // 3. Open encoder with actual capture resolution (not the limit)
         let mut encoder = match config.output_codec {
-            VideoEncoderType::H265 => AmlVencEncoder::new_h265(
-                resolution.width as i32,
-                resolution.height as i32,
-                config.target_fps as i32,
+            VideoEncoderType::H265 => match AmlVencEncoder::new_h265(
+                actual_resolution.width as i32,
+                actual_resolution.height as i32,
+                actual_fps as i32,
                 config.bitrate_kbps as i32,
                 config.gop,
                 config.gop_pattern,
                 config.rc_mode,
-            ),
-            VideoEncoderType::H264 => AmlVencEncoder::new_h264(
-                resolution.width as i32,
-                resolution.height as i32,
-                config.target_fps as i32,
+            ) {
+                Ok(encoder) => encoder,
+                Err(e) => {
+                    error!("Failed to create AML H265 encoder: {}", e);
+                    self.running_flag.store(false, Ordering::Release);
+                    let _ = self.running.send(false);
+                    return;
+                }
+            },
+            VideoEncoderType::H264 => match AmlVencEncoder::new_h264(
+                actual_resolution.width as i32,
+                actual_resolution.height as i32,
+                actual_fps as i32,
                 config.bitrate_kbps as i32,
                 config.gop,
                 config.gop_pattern,
                 config.rc_mode,
-            ),
+            ) {
+                Ok(encoder) => encoder,
+                Err(e) => {
+                    error!("Failed to create AML H264 encoder: {}", e);
+                    self.running_flag.store(false, Ordering::Release);
+                    let _ = self.running.send(false);
+                    return;
+                }
+            },
             _ => {
                 error!("AML pipeline only supports H264/H265");
                 self.running_flag.store(false, Ordering::Release);
@@ -198,7 +274,12 @@ impl AmlPipeline {
             }
         };
 
-        // 3. Generate and broadcast VPS+SPS+PPS header
+        info!(
+            "AML pipeline: encoder created {}x{} @ {}fps codec={:?}",
+            actual_resolution.width, actual_resolution.height, actual_fps, config.output_codec
+        );
+
+        // 4. Generate and broadcast VPS+SPS+PPS header
         match encoder.generate_header() {
             Ok(header) => {
                 info!(
@@ -220,12 +301,12 @@ impl AmlPipeline {
             }
         }
 
-        // 4. Main capture+encode loop
+        // 5. Main capture+encode loop
         let mut consecutive_timeouts: u32 = 0;
         let mut frame_count: u64 = 0;
         let mut fps_frame_count: u64 = 0;
         let mut last_fps_time = Instant::now();
-        let mut current_resolution = resolution;
+        let mut current_resolution = actual_resolution;
         let encode_error_throttler = LogThrottler::with_secs(ENCODE_ERROR_THROTTLE_SECS);
 
         // --- Task 7.3: HDR color mode detection ---
@@ -277,7 +358,7 @@ impl AmlPipeline {
                 }
             }
 
-            let capture_result = match capture.next_frame() {
+            let mut capture_result = match capture.next_frame() {
                 Ok(r) => r,
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::TimedOut {
@@ -300,6 +381,17 @@ impl AmlPipeline {
             };
             consecutive_timeouts = 0;
 
+            if frame_count == 0 {
+                if let FrameData::DmaBuf(dma) = &capture_result.frame {
+                    info!(
+                        "AML pipeline: first frame dma fd={} fd2={} w={} h={} bpl={} size={} fmt={:#x} enc={}x{}",
+                        dma.dmabuf_fd, dma.dmabuf_fd2, dma.width, dma.height,
+                        dma.bytesperline, dma.size, dma.format,
+                        encoder.width(), encoder.height()
+                    );
+                }
+            }
+
             // Handle reconfiguration
             if capture_result.reconfigured {
                 let new_res = capture_result.resolution;
@@ -314,24 +406,36 @@ impl AmlPipeline {
                 // TODO: recreate encoder with new resolution
             }
 
-            // Encode
+            if self.keyframe_requested.swap(false, Ordering::AcqRel) {
+                encoder.request_keyframe();
+                debug!("AML pipeline: keyframe requested for next frame");
+            }
+
+            // Encode: vfmcap Vulkan output has stride = width (no padding).
+            // The bytesperline field is from the raw V4L2 capture (AMLY format),
+            // not the converted NV12 output. Use encoder width as stride.
+            // dmabuf_fd = Y plane, dmabuf_fd2 = UV plane (separate buffers).
             let encode_result = match &capture_result.frame {
                 FrameData::DmaBuf(dma) => {
                     let num_planes = if dma.dmabuf_fd2 >= 0 { 2 } else { 1 };
+                    let stride = encoder.width();
                     encoder.encode_dma(
                         dma.dmabuf_fd,
                         dma.dmabuf_fd2,
                         num_planes,
-                        dma.bytesperline as i32,
+                        stride,
                     )
                 }
                 FrameData::Mapped { .. } => {
                     error!("AML pipeline received Mapped frame, expected DmaBuf");
+                    capture.release_frame(&capture_result.frame);
                     continue;
                 }
             };
 
-            // Release capture frame after encode
+            // Release capture frame immediately after encode.
+            // vfmcap requires every acquired frame to be released before stop/close.
+            // The VPU encoder has already read from the DMA buffer by this point.
             capture.release_frame(&capture_result.frame);
 
             match encode_result {
@@ -345,14 +449,14 @@ impl AmlPipeline {
                     fps_frame_count += 1;
 
                     let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-                    let pts_ms = encoded.timestamp_us as i64 / 1000;
+                    let pts_ms = encoded.pts_us as i64 / 1000;
 
                     let frame = Arc::new(EncodedVideoFrame {
                         data: Bytes::from(encoded.data),
                         pts_ms,
                         is_keyframe: encoded.is_keyframe,
                         sequence,
-                        duration: Duration::from_millis(1000 / config.target_fps as u64),
+                        duration: Duration::from_millis(1000 / actual_fps as u64),
                         codec: config.output_codec,
                     });
 

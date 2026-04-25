@@ -71,9 +71,9 @@ pub struct ModeSwitchTransaction {
 impl Default for StreamManagerConfig {
     fn default() -> Self {
         Self {
-            mode: StreamMode::Mjpeg,
+            mode: StreamMode::WebRTC,
             device: None,
-            format: PixelFormat::Mjpeg,
+            format: PixelFormat::Nv12,
             resolution: Resolution::HD1080,
             fps: 30,
         }
