@@ -228,6 +228,21 @@ impl AmlVencEncoder {
         let mut ret_buf: VlBufferInfo = unsafe { std::mem::zeroed() };
         let frame_type = std::mem::replace(&mut self.pending_frame_type, VlFrameType::Auto);
 
+        {
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        &buf_info as *const VlBufferInfo as *const u8,
+                        std::mem::size_of::<VlBufferInfo>(),
+                    )
+                };
+                warn!("ENCODE_DEBUG buf_info hex: {:02x?}", bytes);
+                warn!("ENCODE_DEBUG handle={} frame_type={:?} stride={} num_planes={} fd={} fd2={}", self.handle, frame_type, stride, num_planes, dmabuf_fd, dmabuf_fd2);
+                warn!("ENCODE_DEBUG VlBufferInfo size={}", std::mem::size_of::<VlBufferInfo>());
+            }
+        }
+
         dma_buf_sync_write_end(dmabuf_fd);
         dma_buf_sync_read_start(dmabuf_fd);
         if dmabuf_fd2 >= 0 {
