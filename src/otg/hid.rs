@@ -137,9 +137,11 @@ impl HidFunction {
 
     /// Create an absolute mouse function
     ///
-    /// Not supported on Amlogic kernels (no `hid.absolute_mouse`
-    /// ConfigFS function).  Still uses `hid.usb{N}` naming so that
-    /// creation will explicitly fail on kernels that lack it.
+    /// **Amlogic limitation:** The Amlogic kernel crashes after ~10-40s
+    /// when more than 2 HID functions (keyboard + mouse) are active.
+    /// `hid.usb{N}` functions work initially but destabilize the USB
+    /// gadget driver. On AML, `resolve_functions` limits to keyboard +
+    /// relative mouse only.
     pub fn mouse_absolute(instance: u8) -> Self {
         Self {
             instance,
@@ -151,9 +153,10 @@ impl HidFunction {
 
     /// Create a consumer control function
     ///
-    /// Not supported on Amlogic kernels (no `hid.consumer`
-    /// ConfigFS function).  Still uses `hid.usb{N}` naming so that
-    /// creation will explicitly fail on kernels that lack it.
+    /// **Amlogic limitation:** The Amlogic kernel crashes after ~10-40s
+    /// when more than 2 HID functions (keyboard + mouse) are active.
+    /// `hid.usb{N}` functions work initially but destabilize the USB
+    /// gadget driver. On AML, `resolve_functions` disables consumer control.
     pub fn consumer_control(instance: u8) -> Self {
         Self {
             instance,
