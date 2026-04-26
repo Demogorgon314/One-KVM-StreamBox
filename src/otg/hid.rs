@@ -35,25 +35,8 @@ impl HidFunctionType {
     /// the kernel creates an OUT endpoint unless `no_out_endpoint=1` is set.
     /// Keyboard with LED support needs the OUT endpoint; other functions
     /// should set `no_out_endpoint=1` and count as 1 endpoint.
-    pub fn endpoints(&self, keyboard_leds: bool) -> u8 {
-        match self {
-            HidFunctionType::Keyboard => {
-                if keyboard_leds {
-                    2 // IN + OUT for LED reports
-                } else {
-                    1 // IN only
-                }
-            }
-            HidFunctionType::MouseRelative => 1,    // IN only
-            HidFunctionType::MouseAbsolute => 1,    // IN only
-            HidFunctionType::ConsumerControl => 1,  // IN only
-        }
-    }
-
-    /// Whether this function needs an OUT endpoint.
-    /// If false, `no_out_endpoint=1` should be set to save endpoints.
-    pub fn needs_out_endpoint(&self, keyboard_leds: bool) -> bool {
-        matches!(self, HidFunctionType::Keyboard) && keyboard_leds
+    pub fn endpoints(&self) -> u8 {
+        2
     }
 
     /// Get HID protocol
@@ -198,7 +181,7 @@ impl GadgetFunction for HidFunction {
     }
 
     fn endpoints_required(&self) -> u8 {
-        self.func_type.endpoints(self.keyboard_leds)
+        self.func_type.endpoints()
     }
 
     fn meta(&self) -> FunctionMeta {
@@ -227,12 +210,6 @@ impl GadgetFunction for HidFunction {
             &func_path.join("report_length"),
             &self.func_type.report_length(self.keyboard_leds).to_string(),
         )?;
-
-        // Disable OUT endpoint for functions that don't need it
-        // (saves endpoints and prevents Amlogic kernel issues)
-        if !self.func_type.needs_out_endpoint(self.keyboard_leds) {
-            write_file(&func_path.join("no_out_endpoint"), "1")?;
-        }
 
         // Write report descriptor
         write_bytes(
@@ -282,10 +259,9 @@ mod tests {
 
     #[test]
     fn test_hid_function_types() {
-        assert_eq!(HidFunctionType::Keyboard.endpoints(false), 1);
-        assert_eq!(HidFunctionType::Keyboard.endpoints(true), 2);
-        assert_eq!(HidFunctionType::MouseRelative.endpoints(false), 1);
-        assert_eq!(HidFunctionType::MouseAbsolute.endpoints(false), 1);
+        assert_eq!(HidFunctionType::Keyboard.endpoints(), 2);
+        assert_eq!(HidFunctionType::MouseRelative.endpoints(), 2);
+        assert_eq!(HidFunctionType::MouseAbsolute.endpoints(), 2);
 
         assert_eq!(HidFunctionType::Keyboard.report_length(false), 8);
         assert_eq!(HidFunctionType::Keyboard.report_length(true), 8);
