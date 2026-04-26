@@ -57,6 +57,7 @@ pub struct AmlPipeline {
     running_rx: watch::Receiver<bool>,
     running: watch::Sender<bool>,
     running_flag: AtomicBool,
+    thread_done: AtomicBool,
     sequence: AtomicU64,
     pipeline_start_time_ms: AtomicI64,
     keyframe_requested: AtomicBool,
@@ -78,6 +79,7 @@ impl AmlPipeline {
             running_rx,
             running: running_tx,
             running_flag: AtomicBool::new(false),
+            thread_done: AtomicBool::new(false),
             sequence: AtomicU64::new(0),
             pipeline_start_time_ms: AtomicI64::new(0),
             keyframe_requested: AtomicBool::new(false),
@@ -125,10 +127,13 @@ impl AmlPipeline {
         self.sequence.store(0, Ordering::Relaxed);
         self.pipeline_start_time_ms.store(0, Ordering::Relaxed);
 
+        self.thread_done.store(false, Ordering::Release);
+
         let pipeline = self.clone();
 
         std::thread::spawn(move || {
             pipeline.run_capture_encode_loop();
+            pipeline.thread_done.store(true, Ordering::Release);
         });
 
         Ok(())
@@ -140,6 +145,17 @@ impl AmlPipeline {
             self.running_flag.store(false, Ordering::Release);
             info!("Stopping AML pipeline");
         }
+    }
+
+    pub fn wait_for_stop(&self, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if self.thread_done.load(Ordering::Acquire) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
     }
 
     fn run_capture_encode_loop(&self) {
@@ -327,10 +343,15 @@ impl AmlPipeline {
             }
         }
 
+        let mut last_subscriber_log = Instant::now();
         while self.running_flag.load(Ordering::Acquire) {
-            if self.subscriber_count() == 0 {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
+            let sub_count = self.subscriber_count();
+            let has_subscribers = sub_count > 0;
+            if !has_subscribers {
+                if last_subscriber_log.elapsed() >= Duration::from_secs(5) {
+                    info!("AML pipeline: no subscribers, capturing but not encoding");
+                    last_subscriber_log = Instant::now();
+                }
             }
 
             // --- Task 7.4: Signal change event polling ---
@@ -359,7 +380,10 @@ impl AmlPipeline {
             }
 
             let mut capture_result = match capture.next_frame() {
-                Ok(r) => r,
+                Ok(r) => {
+                    consecutive_timeouts = 0;
+                    r
+                }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::TimedOut {
                         consecutive_timeouts += 1;
@@ -379,7 +403,6 @@ impl AmlPipeline {
                     continue;
                 }
             };
-            consecutive_timeouts = 0;
 
             if frame_count == 0 {
                 if let FrameData::DmaBuf(dma) = &capture_result.frame {
@@ -411,62 +434,74 @@ impl AmlPipeline {
                 debug!("AML pipeline: keyframe requested for next frame");
             }
 
-            // Encode: vfmcap Vulkan output has stride = width (no padding).
-            // The bytesperline field is from the raw V4L2 capture (AMLY format),
-            // not the converted NV12 output. Use encoder width as stride.
-            // dmabuf_fd = Y plane, dmabuf_fd2 = UV plane (separate buffers).
-            let encode_result = match &capture_result.frame {
-                FrameData::DmaBuf(dma) => {
-                    let num_planes = if dma.dmabuf_fd2 >= 0 { 2 } else { 1 };
-                    let stride = encoder.width();
-                    encoder.encode_dma(
-                        dma.dmabuf_fd,
-                        dma.dmabuf_fd2,
-                        num_planes,
-                        stride,
-                    )
-                }
-                FrameData::Mapped { .. } => {
-                    error!("AML pipeline received Mapped frame, expected DmaBuf");
-                    capture.release_frame(&capture_result.frame);
-                    continue;
-                }
-            };
-
-            // Release capture frame immediately after encode.
-            // vfmcap requires every acquired frame to be released before stop/close.
-            // The VPU encoder has already read from the DMA buffer by this point.
-            capture.release_frame(&capture_result.frame);
-
-            match encode_result {
-                Ok(encoded) => {
-                    if encoded.is_delay {
-                        // B-frame reorder delay, no output
+            // Always release the capture frame to keep vfmcap/vdin streaming.
+            // vfmcap/vdin cannot handle gaps where no frames are consumed;
+            // stopping capture even briefly corrupts the vfm data path.
+            if has_subscribers {
+                // Encode: vfmcap Vulkan output has stride = width (no padding).
+                // The bytesperline field is from the raw V4L2 capture (AMLY format),
+                // not the converted NV12 output. Use encoder width as stride.
+                // dmabuf_fd = Y plane, dmabuf_fd2 = UV plane (separate buffers).
+                let encode_result = match &capture_result.frame {
+                    FrameData::DmaBuf(dma) => {
+                        let num_planes = if dma.dmabuf_fd2 >= 0 { 2 } else { 1 };
+                        let stride = encoder.width();
+                        encoder.encode_dma(
+                            dma.dmabuf_fd,
+                            dma.dmabuf_fd2,
+                            num_planes,
+                            stride,
+                        )
+                    }
+                    FrameData::Mapped { .. } => {
+                        error!("AML pipeline received Mapped frame, expected DmaBuf");
+                        capture.release_frame(&capture_result.frame);
                         continue;
                     }
+                };
 
-                    frame_count += 1;
-                    fps_frame_count += 1;
+                // Release capture frame immediately after encode.
+                // The VPU encoder has already read from the DMA buffer by this point.
+                capture.release_frame(&capture_result.frame);
 
-                    let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-                    let pts_ms = encoded.pts_us as i64 / 1000;
+                match encode_result {
+                    Ok(encoded) => {
+                        if encoded.is_delay {
+                            continue;
+                        }
 
-                    let frame = Arc::new(EncodedVideoFrame {
-                        data: Bytes::from(encoded.data),
-                        pts_ms,
-                        is_keyframe: encoded.is_keyframe,
-                        sequence,
-                        duration: Duration::from_millis(1000 / actual_fps as u64),
-                        codec: config.output_codec,
-                    });
+                        frame_count += 1;
+                        fps_frame_count += 1;
 
-                    self.broadcast_encoded(frame);
-                }
-                Err(e) => {
-                    if encode_error_throttler.should_log("aml_encode") {
-                        error!("AML encode error: {}", e);
+                        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                        let pts_ms = encoded.pts_us as i64 / 1000;
+
+                        let frame = Arc::new(EncodedVideoFrame {
+                            data: Bytes::from(encoded.data),
+                            pts_ms,
+                            is_keyframe: encoded.is_keyframe,
+                            sequence,
+                            duration: Duration::from_millis(1000 / actual_fps as u64),
+                            codec: config.output_codec,
+                        });
+
+                        if frame_count <= 5 || frame_count % 60 == 0 {
+                            info!("AML pipeline: encoded frame #{} (seq={}, key={}, size={})", frame_count, sequence, frame.is_keyframe, frame.data.len());
+                        }
+                        self.broadcast_encoded(frame);
+                    }
+                    Err(e) => {
+                        if encode_error_throttler.should_log("aml_encode") {
+                            error!("AML encode error: {}", e);
+                        }
                     }
                 }
+            } else {
+                // No subscribers: release frame without encoding to keep vdin alive.
+                // Throttle to ~30fps to avoid draining the backlog too quickly,
+                // which can cause vfmcap/vdin to stop producing frames.
+                std::thread::sleep(Duration::from_millis(33));
+                capture.release_frame(&capture_result.frame);
             }
 
             // FPS tracking

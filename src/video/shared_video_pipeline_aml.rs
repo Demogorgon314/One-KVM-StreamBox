@@ -3,6 +3,7 @@ use parking_lot::RwLock as ParkingRwLock;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tracing::{info, warn};
 
 use crate::error::{AppError, Result};
 use crate::video::aml_pipeline::{AmlPipeline, AmlPipelineConfig};
@@ -67,7 +68,7 @@ impl SharedVideoPipeline {
         }))
     }
 
-    pub fn subscribe(&self) -> mpsc::Receiver<Arc<EncodedVideoFrame>> {
+    pub fn subscribe(self: &Arc<Self>) -> mpsc::Receiver<Arc<EncodedVideoFrame>> {
         let (tx, rx) = mpsc::channel(4);
         let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel();
         self.subscribers.write().push(bridge_tx.clone());
@@ -78,11 +79,17 @@ impl SharedVideoPipeline {
             }
         }
 
+        let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             while let Some(frame) = bridge_rx.recv().await {
                 if tx.send(frame).await.is_err() {
                     break;
                 }
+            }
+            // Bridge task exited: remove our sender from the subscribers list
+            if let Some(pipeline) = weak.upgrade() {
+                let mut subs = pipeline.subscribers.write();
+                subs.retain(|s| !s.same_channel(&bridge_tx));
             }
         });
 
@@ -90,7 +97,9 @@ impl SharedVideoPipeline {
     }
 
     pub fn subscriber_count(&self) -> usize {
-        self.subscribers.read().len()
+        let mut subs = self.subscribers.write();
+        subs.retain(|tx| !tx.is_closed());
+        subs.len()
     }
 
     pub async fn request_keyframe(&self) {
@@ -165,8 +174,32 @@ impl SharedVideoPipeline {
         let _ = self.running.send(false);
     }
 
-    pub async fn stop_and_wait(&self, _timeout: Duration) {
-        self.stop();
+    pub async fn stop_and_wait(&self, timeout: Duration) {
+        let pipeline = {
+            let mut guard = self.aml_pipeline.lock().await;
+            guard.take()
+        };
+        info!("stop_and_wait: pipeline is_some={}", pipeline.is_some());
+        // Mark as not running immediately so monitor task can clean up
+        // even if this future is cancelled (e.g. HTTP request aborted).
+        let _ = self.running.send(false);
+        if let Some(pipeline) = pipeline {
+            pipeline.stop();
+            // Block in spawn_blocking so we don't starve the async runtime
+            info!("stop_and_wait: spawning blocking task");
+            let handle = tokio::task::spawn_blocking(move || {
+                info!("blocking task: calling wait_for_stop");
+                let result = pipeline.wait_for_stop(timeout);
+                info!("blocking task: wait_for_stop returned {}", result);
+                result
+            });
+            info!("stop_and_wait: awaiting blocking task");
+            match handle.await {
+                Ok(result) => info!("stop_and_wait: blocking task completed with {}", result),
+                Err(e) => warn!("stop_and_wait: blocking task panicked: {}", e),
+            }
+        }
+        info!("stop_and_wait: done");
     }
 }
 

@@ -1,6 +1,6 @@
 pub mod common;
 pub mod ffmpeg;
-#[cfg(any(target_arch = "aarch64", target_arch = "arm", feature = "rkmpp"))]
+#[cfg(all(any(target_arch = "aarch64", target_arch = "arm", feature = "rkmpp"), not(feature = "aml")))]
 pub mod ffmpeg_hw;
 pub mod ffmpeg_ram;
 

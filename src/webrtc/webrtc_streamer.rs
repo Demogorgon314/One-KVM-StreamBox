@@ -211,13 +211,18 @@ impl WebRtcStreamer {
             return;
         };
 
+        // NOTE: We intentionally NEVER stop the pipeline on AML builds.
+        // The Amlogic vdin0/vfm_cap kernel path gets corrupted when vfmcap
+        // is stopped and restarted, requiring a full device reboot to recover.
+        // Instead, keep the pipeline running indefinitely. It consumes minimal
+        // resources when there are no subscribers (frames are acquired and
+        // dropped). New sessions can subscribe to the existing pipeline.
         let subscriber_count = pipeline.subscriber_count();
-        if Self::should_stop_pipeline(session_count, subscriber_count) {
+        if session_count == 0 {
             info!(
-                "{} stopping video pipeline (sessions={}, subscribers={})",
+                "Keeping video pipeline alive after session close (reason={}, sessions={}, subscribers={}). Stopping would corrupt vdin0/vfm path.",
                 reason, session_count, subscriber_count
             );
-            pipeline.stop();
         } else {
             debug!(
                 "Keeping video pipeline alive (reason={}, sessions={}, subscribers={})",
@@ -446,9 +451,21 @@ impl WebRtcStreamer {
         let mut pipeline_guard = self.video_pipeline.write().await;
 
         if let Some(ref pipeline) = *pipeline_guard {
-            if pipeline.is_running() {
+            let running = pipeline.is_running();
+            info!(
+                "ensure_video_pipeline: existing pipeline found, is_running={}, running_rx={}",
+                running,
+                *pipeline.running_watch().borrow()
+            );
+            if running {
+                info!("ensure_video_pipeline: returning existing running pipeline");
                 return Ok(pipeline.clone());
             }
+            info!("ensure_video_pipeline: existing pipeline not running, dropping and recreating");
+            // Drop the stale pipeline reference so we create a new one
+            *pipeline_guard = None;
+        } else {
+            info!("ensure_video_pipeline: no existing pipeline, will create new");
         }
 
         let codec = *self.video_codec.read().await;
@@ -1038,6 +1055,14 @@ impl WebRtcStreamer {
     /// Close a session
     pub async fn close_session(&self, session_id: &str) -> Result<()> {
         let session = self.sessions.write().await.remove(session_id);
+        let session_count_after = self.sessions.read().await.len();
+
+        info!(
+            "close_session: session_id={}, found={}, sessions_after={}",
+            session_id,
+            session.is_some(),
+            session_count_after
+        );
 
         if let Some(session) = session {
             session.close().await?;
