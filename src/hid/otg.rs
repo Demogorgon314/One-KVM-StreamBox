@@ -1107,18 +1107,16 @@ impl HidBackend for OtgBackend {
 
     async fn send_mouse(&self, event: MouseEvent) -> Result<()> {
         let buttons = self.mouse_buttons.load(Ordering::Relaxed);
+        let has_abs = self.mouse_abs_path.is_some();
+        let has_rel = self.mouse_rel_path.is_some();
 
         match event.event_type {
             MouseEventType::Move => {
-                // Relative movement - use hidg1
                 let dx = event.x.clamp(-127, 127) as i8;
                 let dy = event.y.clamp(-127, 127) as i8;
                 self.send_mouse_report_relative(buttons, dx, dy, 0)?;
             }
             MouseEventType::MoveAbs => {
-                // Absolute movement - use hidg2
-                // Frontend sends 0-32767 range directly (standard HID absolute mouse range)
-                // Don't send button state with move - buttons are handled separately on relative device
                 let x = event.x.clamp(0, 32767) as u16;
                 let y = event.y.clamp(0, 32767) as u16;
                 self.send_mouse_report_absolute(0, x, y, 0)?;
@@ -1127,19 +1125,30 @@ impl HidBackend for OtgBackend {
                 if let Some(button) = event.button {
                     let bit = button.to_hid_bit();
                     let new_buttons = self.mouse_buttons.fetch_or(bit, Ordering::Relaxed) | bit;
-                    // Send on relative device for button clicks
-                    self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    if has_rel {
+                        self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    } else if has_abs {
+                        self.send_mouse_report_absolute(new_buttons, 0, 0, 0)?;
+                    }
                 }
             }
             MouseEventType::Up => {
                 if let Some(button) = event.button {
                     let bit = button.to_hid_bit();
                     let new_buttons = self.mouse_buttons.fetch_and(!bit, Ordering::Relaxed) & !bit;
-                    self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    if has_rel {
+                        self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    } else if has_abs {
+                        self.send_mouse_report_absolute(new_buttons, 0, 0, 0)?;
+                    }
                 }
             }
             MouseEventType::Scroll => {
-                self.send_mouse_report_relative(buttons, 0, 0, event.scroll)?;
+                if has_rel {
+                    self.send_mouse_report_relative(buttons, 0, 0, event.scroll)?;
+                } else if has_abs {
+                    self.send_mouse_report_absolute(buttons, 0, 0, event.scroll)?;
+                }
             }
         }
 
