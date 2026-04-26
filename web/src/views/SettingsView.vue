@@ -14,7 +14,6 @@ import {
   extensionsApi,
   systemApi,
   updateApi,
-  type EncoderBackendInfo,
   type AuthConfig,
   type RustDeskConfigResponse,
   type RustDeskStatusResponse,
@@ -799,15 +798,6 @@ const isSharedAtxSerialRelay = computed(() => {
   )
 })
 
-// Encoder backend
-const availableBackends = ref<EncoderBackendInfo[]>([])
-
-const selectedBackendFormats = computed(() => {
-  if (config.value.encoder_backend === 'auto') return []
-  const backend = availableBackends.value.find(b => b.id === config.value.encoder_backend)
-  return backend?.supported_formats || []
-})
-
 const isCh9329Backend = computed(() => config.value.hid_backend === 'ch9329')
 
 const selectedDevice = computed(() => {
@@ -1142,15 +1132,6 @@ async function loadDevices() {
     devices.value = await configApi.listDevices()
   } catch (e) {
     console.error('Failed to load devices:', e)
-  }
-}
-
-async function loadBackends() {
-  try {
-    const result = await streamApi.getCodecs()
-    availableBackends.value = result.backends || []
-  } catch (e) {
-    console.error('Failed to load encoder backends:', e)
   }
 }
 
@@ -2013,7 +1994,6 @@ onMounted(async () => {
     systemStore.fetchSystemInfo(),
     loadConfig(),
     loadDevices(),
-    loadBackends(),
     loadAuthConfig(),
     loadExtensions(),
     loadAtxConfig(),
@@ -2303,15 +2283,8 @@ watch(() => route.query.tab, (tab) => {
                 <div class="space-y-2">
                   <Label for="encoder-backend">{{ t('settings.backend') }}</Label>
                   <select id="encoder-backend" v-model="config.encoder_backend" class="w-full h-9 px-3 rounded-md border border-input bg-background text-sm">
-                    <option value="auto">{{ t('settings.autoRecommended') }}</option>
-                    <option v-for="backend in availableBackends" :key="backend.id" :value="backend.id">{{ backend.name }} {{ backend.is_hardware ? `(${t('settings.hardware')})` : `(${t('settings.software')})` }}</option>
+                    <option value="auto">Hardware Encoder (Auto)</option>
                   </select>
-                </div>
-                <div v-if="config.encoder_backend !== 'auto' && selectedBackendFormats.length > 0" class="space-y-2">
-                  <Label>{{ t('settings.supportedFormats') }}</Label>
-                  <div class="flex flex-wrap gap-2">
-                    <Badge v-for="format in selectedBackendFormats" :key="format" variant="outline">{{ format.toUpperCase() }}</Badge>
-                  </div>
                 </div>
                 <p class="text-xs text-muted-foreground">{{ t('settings.encoderHint') }}</p>
               </CardContent>
