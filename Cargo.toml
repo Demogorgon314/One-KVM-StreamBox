@@ -136,16 +136,17 @@ toml = "0.8"
 cc = "1"
 
 [features]
-default = ["hwencode"]
-hwencode = ["dep:hwcodec", "dep:libyuv", "dep:v4l2r", "dep:turbojpeg"]
-aml = []
+default = ["hwencode", "v4l2"]
+hwencode = ["dep:hwcodec", "dep:libyuv", "dep:turbojpeg"]
+v4l2 = ["dep:v4l2r"]
+aml = ["hwcodec/aml"]
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+panic = "unwind"
 
 # Static linking profile for musl targets
 [profile.release-static]
