@@ -185,11 +185,26 @@ impl Streamer {
 
     pub async fn stats(&self) -> StreamerStats {
         let config = self.config.read().await;
+        // Query actual HDMI signal resolution from vfmcap device.
+        // The configured resolution may be a max/downscaled limit,
+        // but the UI should show the actual input signal size.
+        let actual_resolution = config
+            .device_path
+            .as_ref()
+            .and_then(|path| query_vfmcap_signal_resolution(path))
+            .unwrap_or(config.resolution);
+        tracing::debug!(
+            "Streamer stats: configured={}x{}, actual={}x{}",
+            config.resolution.width,
+            config.resolution.height,
+            actual_resolution.width,
+            actual_resolution.height
+        );
         StreamerStats {
             state: self.state().await,
             device: self.current_device().await.map(|d| d.name),
             format: Some(config.format.to_string()),
-            resolution: Some((config.resolution.width, config.resolution.height)),
+            resolution: Some((actual_resolution.width, actual_resolution.height)),
             clients: self.mjpeg_handler.client_count(),
             target_fps: config.fps,
             fps: 0.0,
@@ -260,5 +275,51 @@ impl serde::Serialize for StreamerState {
             StreamerState::Recovering => "recovering",
         };
         serializer.serialize_str(s)
+    }
+}
+
+/// Query the actual HDMI signal resolution from a vfmcap device.
+/// This opens the device briefly to get signal info without starting capture.
+fn query_vfmcap_signal_resolution(device_path: &std::path::Path) -> Option<Resolution> {
+    use crate::ffi::vfmcap::{
+        vfmcap_close, vfmcap_get_signal_info, vfmcap_open, VfmcapColorMode, VfmcapConfig,
+        VfmcapOutputFmt, VfmcapSignalInfo,
+    };
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+
+    let device_str = CString::new(device_path.to_string_lossy().as_bytes()).ok()?;
+    let config = VfmcapConfig {
+        output_format: VfmcapOutputFmt::Nv12,
+        target_width: 0,
+        target_height: 0,
+        target_fps: 0.0,
+        color_mode: VfmcapColorMode::Passthrough,
+    };
+
+    let ctx = unsafe { vfmcap_open(device_str.as_ptr() as *const c_char, &config) };
+    if ctx.is_null() {
+        return None;
+    }
+
+    let mut info = VfmcapSignalInfo {
+        width: 0,
+        height: 0,
+        fps: 0,
+        pixelformat: 0,
+        signal_type: 0,
+        hdr_status: 0,
+        is_interlaced: 0,
+        status: 0,
+        bitdepth: 0,
+    };
+
+    let result = unsafe { vfmcap_get_signal_info(ctx, &mut info) };
+    unsafe { vfmcap_close(ctx) };
+
+    if result == 0 && info.width > 0 && info.height > 0 {
+        Some(Resolution::new(info.width, info.height))
+    } else {
+        None
     }
 }
