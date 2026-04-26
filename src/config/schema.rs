@@ -174,6 +174,10 @@ pub enum OtgEndpointBudget {
     Five,
     /// Limit OTG gadget functions to 6 endpoints.
     Six,
+    /// Limit OTG gadget functions to 8 endpoints.
+    Eight,
+    /// Limit OTG gadget functions to 10 endpoints.
+    Ten,
     /// Do not impose a software endpoint budget.
     Unlimited,
 }
@@ -183,7 +187,7 @@ impl OtgEndpointBudget {
         if udc.is_some_and(crate::otg::configfs::is_low_endpoint_udc) {
             Self::Five
         } else {
-            Self::Six
+            Self::Eight
         }
     }
 
@@ -198,6 +202,8 @@ impl OtgEndpointBudget {
         match self.resolved(udc) {
             Self::Five => Some(5),
             Self::Six => Some(6),
+            Self::Eight => Some(8),
+            Self::Ten => Some(10),
             Self::Unlimited => None,
             Self::Auto => unreachable!("auto budget must be resolved before use"),
         }
@@ -256,22 +262,19 @@ impl OtgHidFunctions {
         !self.keyboard && !self.mouse_relative && !self.mouse_absolute && !self.consumer
     }
 
-    pub fn endpoint_cost(&self, keyboard_leds: bool) -> u8 {
+    pub fn endpoint_cost(&self, _keyboard_leds: bool) -> u8 {
         let mut endpoints = 0;
         if self.keyboard {
-            endpoints += 1;
-            if keyboard_leds {
-                endpoints += 1;
-            }
+            endpoints += 2;
         }
         if self.mouse_relative {
-            endpoints += 1;
+            endpoints += 2;
         }
         if self.mouse_absolute {
-            endpoints += 1;
+            endpoints += 2;
         }
         if self.consumer {
-            endpoints += 1;
+            endpoints += 2;
         }
         endpoints
     }
@@ -306,11 +309,10 @@ impl OtgHidProfile {
 
         #[cfg(feature = "aml")]
         {
-            let use_absolute = functions.mouse_absolute;
             OtgHidFunctions {
                 keyboard: functions.keyboard,
-                mouse_relative: !use_absolute,
-                mouse_absolute: use_absolute,
+                mouse_relative: functions.mouse_relative,
+                mouse_absolute: functions.mouse_absolute,
                 consumer: false,
             }
         }

@@ -22,6 +22,37 @@ const CAPTURE_TIMEOUT_STOP_THRESHOLD: u32 = 60;
 const ENCODE_ERROR_THROTTLE_SECS: u64 = 5;
 const VFMCAP_BUFFER_COUNT: u32 = 12;
 
+fn create_encoder(
+    config: &AmlPipelineConfig,
+    width: i32,
+    height: i32,
+    fps: i32,
+) -> std::result::Result<AmlVencEncoder, AppError> {
+    match config.output_codec {
+        VideoEncoderType::H265 => AmlVencEncoder::new_h265(
+            width,
+            height,
+            fps,
+            config.bitrate_kbps as i32,
+            config.gop,
+            config.gop_pattern,
+            config.rc_mode,
+        ),
+        VideoEncoderType::H264 => AmlVencEncoder::new_h264(
+            width,
+            height,
+            fps,
+            config.bitrate_kbps as i32,
+            config.gop,
+            config.gop_pattern,
+            config.rc_mode,
+        ),
+        _ => Err(AppError::VideoError(
+            "AML pipeline only supports H264/H265".to_string(),
+        )),
+    }
+}
+
 pub struct AmlPipelineConfig {
     pub max_width: u32,
     pub max_height: u32,
@@ -247,43 +278,10 @@ impl AmlPipeline {
         };
 
         // 3. Open encoder with actual capture resolution (not the limit)
-        let mut encoder = match config.output_codec {
-            VideoEncoderType::H265 => match AmlVencEncoder::new_h265(
-                actual_resolution.width as i32,
-                actual_resolution.height as i32,
-                actual_fps as i32,
-                config.bitrate_kbps as i32,
-                config.gop,
-                config.gop_pattern,
-                config.rc_mode,
-            ) {
-                Ok(encoder) => encoder,
-                Err(e) => {
-                    error!("Failed to create AML H265 encoder: {}", e);
-                    self.running_flag.store(false, Ordering::Release);
-                    let _ = self.running.send(false);
-                    return;
-                }
-            },
-            VideoEncoderType::H264 => match AmlVencEncoder::new_h264(
-                actual_resolution.width as i32,
-                actual_resolution.height as i32,
-                actual_fps as i32,
-                config.bitrate_kbps as i32,
-                config.gop,
-                config.gop_pattern,
-                config.rc_mode,
-            ) {
-                Ok(encoder) => encoder,
-                Err(e) => {
-                    error!("Failed to create AML H264 encoder: {}", e);
-                    self.running_flag.store(false, Ordering::Release);
-                    let _ = self.running.send(false);
-                    return;
-                }
-            },
-            _ => {
-                error!("AML pipeline only supports H264/H265");
+        let mut encoder = match create_encoder(config, actual_resolution.width as i32, actual_resolution.height as i32, actual_fps as i32) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("Failed to create AML encoder: {}", e);
                 self.running_flag.store(false, Ordering::Release);
                 let _ = self.running.send(false);
                 return;
@@ -354,29 +352,14 @@ impl AmlPipeline {
                 }
             }
 
-            // --- Task 7.4: Signal change event polling ---
-            // Check for source change events between frames
+            // --- Signal change event polling ---
+            // Check for source change events between frames.
+            // Actual encoder recreation happens when next_frame returns reconfigured=true.
             let event = capture.poll_event(0);
             if event == crate::ffi::vfmcap::VFMCAP_EVENT_SOURCE_CHANGE {
-                info!("AML pipeline: source change event detected, reconfiguring...");
-                match capture.signal_info() {
-                    Ok(info) => {
-                        let new_res = Resolution::new(info.width, info.height);
-                        if new_res != current_resolution {
-                            info!(
-                                "AML pipeline: resolution changed {}x{} -> {}x{}",
-                                current_resolution.width, current_resolution.height,
-                                new_res.width, new_res.height
-                            );
-                            current_resolution = new_res;
-                            // Signal upstream that reconfiguration is needed
-                            // Full encoder recreation is handled by restarting the pipeline
-                        }
-                    }
-                    Err(e) => {
-                        warn!("AML pipeline: failed to read signal info after source change: {}", e);
-                    }
-                }
+                info!("AML pipeline: source change event detected, waiting for reconfigured frame...");
+            } else if event == crate::ffi::vfmcap::VFMCAP_EVENT_NOSIG {
+                trace!("AML pipeline: no signal");
             }
 
             let mut capture_result = match capture.next_frame() {
@@ -418,15 +401,74 @@ impl AmlPipeline {
             // Handle reconfiguration
             if capture_result.reconfigured {
                 let new_res = capture_result.resolution;
+                if new_res.width == 0 || new_res.height == 0 {
+                    warn!(
+                        "AML pipeline: reconfigured to invalid resolution {}x{}, skipping encoder recreation",
+                        new_res.width, new_res.height
+                    );
+                    capture.release_frame(&capture_result.frame);
+                    continue;
+                }
                 info!(
-                    "AML pipeline: reconfigured {}x{} -> {}x{}",
+                    "AML pipeline: reconfigured {}x{} -> {}x{}, recreating encoder",
                     current_resolution.width,
                     current_resolution.height,
                     new_res.width,
                     new_res.height
                 );
-                current_resolution = new_res;
-                // TODO: recreate encoder with new resolution
+
+                let target_w = if config.max_width > 0 && new_res.width > config.max_width {
+                    config.max_width
+                } else {
+                    new_res.width
+                };
+                let target_h = if config.max_height > 0 && new_res.height > config.max_height {
+                    config.max_height
+                } else {
+                    new_res.height
+                };
+
+                match create_encoder(config, target_w as i32, target_h as i32, actual_fps as i32) {
+                    Ok(mut new_encoder) => {
+                        match new_encoder.generate_header() {
+                            Ok(header) => {
+                                info!(
+                                    "AML pipeline: new encoder header ({} bytes) for {}x{}",
+                                    header.len(),
+                                    target_w,
+                                    target_h
+                                );
+                                let header_frame = Arc::new(EncodedVideoFrame {
+                                    data: Bytes::from(header),
+                                    pts_ms: 0,
+                                    is_keyframe: true,
+                                    sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+                                    duration: Duration::from_millis(0),
+                                    codec: config.output_codec,
+                                });
+                                self.broadcast_encoded(header_frame);
+                            }
+                            Err(e) => {
+                                warn!("AML pipeline: failed to generate new encoder header: {}", e);
+                            }
+                        }
+
+                        let old_width = encoder.width();
+                        let old_height = encoder.height();
+                        encoder = new_encoder;
+                        current_resolution = Resolution::new(target_w, target_h);
+                        info!(
+                            "AML pipeline: encoder recreated {}x{} -> {}x{}",
+                            old_width, old_height, target_w, target_h
+                        );
+                    }
+                    Err(e) => {
+                        error!("AML pipeline: failed to recreate encoder for {}x{}: {}", target_w, target_h, e);
+                    }
+                }
+
+                capture.release_frame(&capture_result.frame);
+                continue;
             }
 
             if self.keyframe_requested.swap(false, Ordering::AcqRel) {
