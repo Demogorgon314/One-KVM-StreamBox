@@ -287,7 +287,34 @@ impl EncoderRegistry {
         static INSTANCE: OnceLock<EncoderRegistry> = OnceLock::new();
         INSTANCE.get_or_init(|| {
             let mut registry = EncoderRegistry::new();
-            registry.detect_encoders(1280, 720);
+            #[cfg(feature = "aml")]
+            {
+                // On AML builds, skip hwcodec encoder detection. Probing V4L2/ionvideo
+                // devices during detection disrupts the vdin0 HDMI input path while
+                // vfm_cap is streaming, causing signal loss that requires reboot.
+                // We use AmlVencEncoder directly, so hwcodec detection is unnecessary.
+                info!("AML build: skipping hwcodec encoder detection to avoid vdin0 disruption");
+                registry.register_software_fallbacks();
+                // Also register known AML hardware encoders
+                registry.encoders.entry(VideoEncoderType::H264).or_default().push(AvailableEncoder {
+                    format: VideoEncoderType::H264,
+                    codec_name: "h264_aml".to_string(),
+                    backend: EncoderBackend::Amlvenc,
+                    priority: 1,
+                    is_hardware: true,
+                });
+                registry.encoders.entry(VideoEncoderType::H265).or_default().push(AvailableEncoder {
+                    format: VideoEncoderType::H265,
+                    codec_name: "hevc_aml".to_string(),
+                    backend: EncoderBackend::Amlvenc,
+                    priority: 1,
+                    is_hardware: true,
+                });
+            }
+            #[cfg(not(feature = "aml"))]
+            {
+                registry.detect_encoders(1280, 720);
+            }
             registry
         })
     }
