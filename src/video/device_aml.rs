@@ -92,8 +92,8 @@ fn build_aml_video_device_info(path: PathBuf) -> VideoDeviceInfo {
         formats: vec![FormatInfo {
             format: PixelFormat::Nv12,
             resolutions: vec![
-                ResolutionInfo::new(1920, 1080, vec![30.0, 60.0]),
-                ResolutionInfo::new(3840, 2160, vec![30.0, 60.0]),
+                ResolutionInfo::new(1920, 1080, vec![30.0, 60.0, 120.0, 240.0]),
+                ResolutionInfo::new(3840, 2160, vec![30.0, 60.0, 120.0, 240.0]),
             ],
             description: "AML VFM Capture NV12".to_string(),
         }],
