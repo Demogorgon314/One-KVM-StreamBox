@@ -120,6 +120,9 @@ impl HidFunction {
         Self {
             instance,
             func_type: HidFunctionType::MouseAbsolute,
+            #[cfg(feature = "aml")]
+            name: "hid.mouse".to_string(),
+            #[cfg(not(feature = "aml"))]
             name: format!("hid.usb{}", instance),
             keyboard_leds: false,
         }

@@ -178,6 +178,19 @@ impl OtgService {
                 if let Err(e) = m.cleanup() {
                     warn!("Error cleaning up existing gadget: {}", e);
                 }
+            } else {
+                let gadget_path = std::path::Path::new("/sys/kernel/config/usb_gadget")
+                    .join(super::configfs::DEFAULT_GADGET_NAME);
+                if gadget_path.exists() {
+                    info!("Cleaning up stale gadget from previous run");
+                    let mut tmp_manager = OtgGadgetManager::with_config(
+                        super::configfs::DEFAULT_GADGET_NAME,
+                        super::endpoint::DEFAULT_MAX_ENDPOINTS,
+                    );
+                    if let Err(e) = tmp_manager.cleanup() {
+                        warn!("Error cleaning up stale gadget: {}", e);
+                    }
+                }
             }
         }
 

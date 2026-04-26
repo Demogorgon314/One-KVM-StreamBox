@@ -369,10 +369,11 @@ impl OtgHidProfile {
         {
             // Amlogic kernel crashes with more than 2 HID functions (keyboard + mouse).
             // hid.usb* functions are not stable on Amlogic.
+            let use_absolute = functions.mouse_absolute;
             OtgHidFunctions {
                 keyboard: functions.keyboard,
-                mouse_relative: functions.mouse_relative || functions.mouse_absolute,
-                mouse_absolute: false,
+                mouse_relative: !use_absolute,
+                mouse_absolute: use_absolute,
                 consumer: false,
             }
         }

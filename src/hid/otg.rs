@@ -952,6 +952,8 @@ impl HidBackend for OtgBackend {
 
     async fn send_mouse(&self, event: MouseEvent) -> Result<()> {
         let buttons = self.mouse_buttons.load(Ordering::Relaxed);
+        let has_abs = self.mouse_abs_path.is_some();
+        let has_rel = self.mouse_rel_path.is_some();
 
         match event.event_type {
             MouseEventType::Move => {
@@ -969,18 +971,30 @@ impl HidBackend for OtgBackend {
                 if let Some(button) = event.button {
                     let bit = button.to_hid_bit();
                     let new_buttons = self.mouse_buttons.fetch_or(bit, Ordering::Relaxed) | bit;
-                    self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    if has_rel {
+                        self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    } else if has_abs {
+                        self.send_mouse_report_absolute(new_buttons, 0, 0, 0)?;
+                    }
                 }
             }
             MouseEventType::Up => {
                 if let Some(button) = event.button {
                     let bit = button.to_hid_bit();
                     let new_buttons = self.mouse_buttons.fetch_and(!bit, Ordering::Relaxed) & !bit;
-                    self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    if has_rel {
+                        self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
+                    } else if has_abs {
+                        self.send_mouse_report_absolute(new_buttons, 0, 0, 0)?;
+                    }
                 }
             }
             MouseEventType::Scroll => {
-                self.send_mouse_report_relative(buttons, 0, 0, event.scroll)?;
+                if has_rel {
+                    self.send_mouse_report_relative(buttons, 0, 0, event.scroll)?;
+                } else if has_abs {
+                    self.send_mouse_report_absolute(buttons, 0, 0, event.scroll)?;
+                }
             }
         }
 
