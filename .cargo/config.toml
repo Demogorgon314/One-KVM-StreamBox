@@ -1,0 +1,11 @@
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "/home/anshi/yocto/one-kvm-streambox/One-KVM-StreamBox/vendor"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "/home/anshi/yocto/one-kvm-streambox/build-direct/wrapper/target-rust-ccld"
+
+[build]
+target = "aarch64-unknown-linux-gnu"

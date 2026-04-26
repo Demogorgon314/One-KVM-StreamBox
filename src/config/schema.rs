@@ -296,28 +296,13 @@ impl OtgHidProfile {
     }
 
     pub fn resolve_functions(&self, custom: &OtgHidFunctions) -> OtgHidFunctions {
-        let functions = match self {
+        match self {
             Self::Full => OtgHidFunctions::full(),
             Self::FullNoConsumer => OtgHidFunctions::full_no_consumer(),
             Self::LegacyKeyboard => OtgHidFunctions::legacy_keyboard(),
             Self::LegacyMouseRelative => OtgHidFunctions::legacy_mouse_relative(),
             Self::Custom => custom.clone(),
-        };
-
-        #[cfg(feature = "aml")]
-        {
-            // Amlogic kernel crashes with more than 2 HID functions (keyboard + mouse).
-            // hid.usb* functions are not stable on Amlogic.
-            OtgHidFunctions {
-                keyboard: functions.keyboard,
-                mouse_relative: functions.mouse_relative || functions.mouse_absolute,
-                mouse_absolute: false,
-                consumer: false,
-            }
         }
-
-        #[cfg(not(feature = "aml"))]
-        functions
     }
 }
 
@@ -446,12 +431,6 @@ pub struct MsdConfig {
 impl Default for MsdConfig {
     fn default() -> Self {
         Self {
-            // MSD is disabled by default on Amlogic because the
-            // mass_storage gadget function panics the kernel on
-            // USB enumeration without a backing image.
-            #[cfg(feature = "aml")]
-            enabled: false,
-            #[cfg(not(feature = "aml"))]
             enabled: true,
             msd_dir: String::new(),
         }

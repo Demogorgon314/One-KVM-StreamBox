@@ -715,16 +715,8 @@ pub async fn setup_init(
             if let Some(enabled) = req.hid_otg_keyboard_leds {
                 config.hid.otg_keyboard_leds = enabled;
             }
-            // On Amlogic platforms, MSD must remain disabled because the
-            // kernel's usb_f_mass_storage driver panics on USB enumeration.
-            // The user can still see MSD in the UI but it cannot be enabled.
-            #[cfg(not(feature = "aml"))]
             if let Some(enabled) = req.msd_enabled {
                 config.msd.enabled = enabled;
-            }
-            #[cfg(feature = "aml")]
-            {
-                config.msd.enabled = false;
             }
 
             // Extension settings

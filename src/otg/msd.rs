@@ -338,10 +338,11 @@ impl GadgetFunction for MsdFunction {
         let func_path = self.function_path(gadget_path);
         create_dir(&func_path)?;
 
-        // Set stall to 0 (workaround for some hosts)
+        // Set stall to 1 - required for Amlogic kernels and most hosts.
+        // stall=0 can cause protocol errors on some controllers.
         let stall_path = func_path.join("stall");
         if stall_path.exists() {
-            let _ = write_file(&stall_path, "0");
+            let _ = write_file(&stall_path, "1");
         }
 
         // LUN 0 is created automatically, but ensure it exists
