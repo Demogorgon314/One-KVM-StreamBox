@@ -40,7 +40,7 @@ impl Default for AmlPipelineConfig {
         Self {
             max_width: 3840,
             max_height: 2160,
-            max_fps: 60.0,
+            max_fps: 240.0,
             color_mode: VfmcapColorMode::Passthrough,
             output_codec: VideoEncoderType::H265,
             bitrate_kbps: 8000,
