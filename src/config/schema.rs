@@ -357,13 +357,28 @@ impl OtgHidProfile {
     }
 
     pub fn resolve_functions(&self, custom: &OtgHidFunctions) -> OtgHidFunctions {
-        match self {
+        let functions = match self {
             Self::Full => OtgHidFunctions::full(),
             Self::FullNoConsumer => OtgHidFunctions::full_no_consumer(),
             Self::LegacyKeyboard => OtgHidFunctions::legacy_keyboard(),
             Self::LegacyMouseRelative => OtgHidFunctions::legacy_mouse_relative(),
             Self::Custom => custom.clone(),
+        };
+
+        #[cfg(feature = "aml")]
+        {
+            // Amlogic kernel crashes with more than 2 HID functions (keyboard + mouse).
+            // hid.usb* functions are not stable on Amlogic.
+            OtgHidFunctions {
+                keyboard: functions.keyboard,
+                mouse_relative: functions.mouse_relative || functions.mouse_absolute,
+                mouse_absolute: false,
+                consumer: false,
+            }
         }
+
+        #[cfg(not(feature = "aml"))]
+        functions
     }
 }
 
