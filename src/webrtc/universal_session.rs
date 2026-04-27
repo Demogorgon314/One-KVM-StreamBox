@@ -591,6 +591,10 @@ impl UniversalSession {
         mut frame_rx: tokio::sync::mpsc::Receiver<std::sync::Arc<EncodedVideoFrame>>,
         request_keyframe: Arc<dyn Fn() + Send + Sync + 'static>,
     ) {
+        if let Some(handle) = self.video_receiver_handle.lock().await.take() {
+            handle.abort();
+        }
+
         info!(
             "Starting {} session {} with shared encoder",
             self.codec, self.session_id

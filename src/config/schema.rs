@@ -65,6 +65,19 @@ impl Default for AuthConfig {
     }
 }
 
+/// HDR mode for video capture
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum HdrMode {
+    /// Auto: pass through HDR content as-is (10-bit P010), SDR stays 8-bit NV12
+    #[default]
+    Auto,
+    /// SDR Only: convert all content to SDR BT.709 (8-bit NV12)
+    SdrOnly,
+}
+
 /// Video capture configuration
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,17 +95,20 @@ pub struct VideoConfig {
     pub fps: u32,
     /// JPEG quality (1-100)
     pub quality: u32,
+    /// HDR mode
+    pub hdr_mode: HdrMode,
 }
 
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
             device: None,
-            format: None, // Auto-detect or use MJPEG as default
+            format: None,
             width: 1920,
             height: 1080,
             fps: 30,
             quality: 80,
+            hdr_mode: HdrMode::Auto,
         }
     }
 }

@@ -679,6 +679,10 @@ export default {
     software: 'Software',
     supportedFormats: 'Supported Formats',
     encoderHint: 'Hardware encoders provide better performance with lower CPU usage. Software encoders are more compatible but require more CPU resources.',
+    hdrMode: 'HDR Mode',
+    hdrAuto: 'Auto (HDR Passthrough)',
+    hdrSdrOnly: 'SDR Only',
+    hdrModeHint: 'Auto: passes through HDR10/HLG content as 10-bit. SDR Only: converts all content to 8-bit SDR BT.709.',
     // HID tab
     hidSettings: 'HID Settings',
     hidSettingsDesc: 'Configure keyboard and mouse control',

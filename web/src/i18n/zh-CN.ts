@@ -679,6 +679,10 @@ export default {
     software: '软件',
     supportedFormats: '支持的格式',
     encoderHint: '硬件编码器性能更好，CPU 占用更低。软件编码器兼容性更好，但需要更多 CPU 资源。',
+    hdrMode: 'HDR 模式',
+    hdrAuto: '自动（HDR 直通）',
+    hdrSdrOnly: '仅 SDR',
+    hdrModeHint: '自动：以 10 位直通 HDR10/HLG 内容。仅 SDR：将所有内容转换为 8 位 SDR BT.709。',
     // HID tab
     hidSettings: 'HID 设置',
     hidSettingsDesc: '配置键盘和鼠标控制',

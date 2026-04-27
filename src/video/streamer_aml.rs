@@ -8,6 +8,8 @@ use crate::error::{AppError, Result};
 use crate::events::{EventBus, SystemEvent};
 use crate::stream::MjpegStreamHandler;
 
+const SIGNAL_INFO_SYSFS: &str = "/sys/class/video4linux/video0/signal_info";
+
 #[derive(Debug, Clone)]
 pub struct StreamerConfig {
     pub device_path: Option<PathBuf>,
@@ -278,47 +280,23 @@ impl serde::Serialize for StreamerState {
     }
 }
 
-/// Query the actual HDMI signal resolution from a vfmcap device.
-/// This opens the device briefly to get signal info without starting capture.
-fn query_vfmcap_signal_resolution(device_path: &std::path::Path) -> Option<Resolution> {
-    use crate::ffi::vfmcap::{
-        vfmcap_close, vfmcap_get_signal_info, vfmcap_open, VfmcapColorMode, VfmcapConfig,
-        VfmcapOutputFmt, VfmcapSignalInfo,
-    };
-    use std::ffi::CString;
-    use std::os::raw::c_char;
+/// Query the actual HDMI signal resolution without opening vfmcap.
+fn query_vfmcap_signal_resolution(_device_path: &std::path::Path) -> Option<Resolution> {
+    let s = std::fs::read_to_string(SIGNAL_INFO_SYSFS).ok()?;
+    let mut width = 0;
+    let mut height = 0;
 
-    let device_str = CString::new(device_path.to_string_lossy().as_bytes()).ok()?;
-    let config = VfmcapConfig {
-        output_format: VfmcapOutputFmt::Nv12,
-        target_width: 0,
-        target_height: 0,
-        target_fps: 0.0,
-        color_mode: VfmcapColorMode::Passthrough,
-    };
-
-    let ctx = unsafe { vfmcap_open(device_str.as_ptr() as *const c_char, &config) };
-    if ctx.is_null() {
-        return None;
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("width:") {
+            width = value.trim().parse().ok()?;
+        } else if let Some(value) = line.strip_prefix("height:") {
+            height = value.trim().parse().ok()?;
+        }
     }
 
-    let mut info = VfmcapSignalInfo {
-        width: 0,
-        height: 0,
-        fps: 0,
-        pixelformat: 0,
-        signal_type: 0,
-        hdr_status: 0,
-        is_interlaced: 0,
-        status: 0,
-        bitdepth: 0,
-    };
-
-    let result = unsafe { vfmcap_get_signal_info(ctx, &mut info) };
-    unsafe { vfmcap_close(ctx) };
-
-    if result == 0 && info.width > 0 && info.height > 0 {
-        Some(Resolution::new(info.width, info.height))
+    if width > 0 && height > 0 {
+        Some(Resolution::new(width, height))
     } else {
         None
     }

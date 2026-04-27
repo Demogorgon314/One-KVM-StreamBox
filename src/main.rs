@@ -32,10 +32,10 @@ use one_kvm::video::codec_constraints::{
     enforce_constraints_with_stream_manager, StreamCodecConstraints,
 };
 use one_kvm::video::format::{PixelFormat, Resolution};
-#[cfg(feature = "hwencode")]
-use one_kvm::video::{Streamer, VideoStreamManager};
 #[cfg(not(feature = "hwencode"))]
 use one_kvm::video::VideoStreamManager;
+#[cfg(feature = "hwencode")]
+use one_kvm::video::{Streamer, VideoStreamManager};
 use one_kvm::web;
 #[cfg(feature = "hwencode")]
 use one_kvm::webrtc::{WebRtcStreamer, WebRtcStreamerConfig};
@@ -323,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
                 fps: config.video.fps,
                 bitrate_preset: config.stream.bitrate_preset,
                 encoder_backend: config.stream.encoder.to_backend(),
+                hdr_mode: config.video.hdr_mode,
                 webrtc: {
                     let mut stun_servers = vec![];
                     let mut turn_servers = vec![];
@@ -365,7 +366,8 @@ async fn main() -> anyhow::Result<()> {
                         }
                         if let Some(ref turn) = config.stream.turn_server {
                             if !turn.is_empty() {
-                                let username = config.stream.turn_username.clone().unwrap_or_default();
+                                let username =
+                                    config.stream.turn_username.clone().unwrap_or_default();
                                 let credential =
                                     config.stream.turn_password.clone().unwrap_or_default();
                                 turn_servers.push(one_kvm::webrtc::config::TurnServer::new(
@@ -414,8 +416,14 @@ async fn main() -> anyhow::Result<()> {
             actual_fps
         );
         webrtc_streamer
-            .update_video_config(actual_resolution, actual_format, actual_fps)
-            .await;
+            .update_video_config(
+                actual_resolution,
+                actual_format,
+                actual_fps,
+                config.video.hdr_mode,
+            )
+            .await
+            .ok();
         if let Some(device_path) = device_path {
             webrtc_streamer
                 .set_capture_device(device_path, jpeg_quality)

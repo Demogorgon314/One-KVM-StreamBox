@@ -54,22 +54,15 @@ use crate::video::encoder::BitratePreset;
 /// WebRTC streamer configuration
 #[derive(Debug, Clone)]
 pub struct WebRtcStreamerConfig {
-    /// WebRTC configuration (STUN/TURN servers, etc.)
     pub webrtc: WebRtcConfig,
-    /// Video codec type
     pub video_codec: VideoCodecType,
-    /// Input resolution
     pub resolution: Resolution,
-    /// Input pixel format
     pub input_format: PixelFormat,
-    /// Bitrate preset
     pub bitrate_preset: BitratePreset,
-    /// Target FPS
     pub fps: u32,
-    /// Enable audio (reserved)
     pub audio_enabled: bool,
-    /// Encoder backend (None = auto select best available)
     pub encoder_backend: Option<EncoderBackend>,
+    pub hdr_mode: crate::config::HdrMode,
 }
 
 impl Default for WebRtcStreamerConfig {
@@ -83,6 +76,7 @@ impl Default for WebRtcStreamerConfig {
             fps: 30,
             audio_enabled: false,
             encoder_backend: None,
+            hdr_mode: crate::config::HdrMode::default(),
         }
     }
 }
@@ -216,6 +210,56 @@ impl WebRtcStreamer {
         Ok(())
     }
 
+    async fn restart_pipeline_preserving_sessions(self: &Arc<Self>, reason: &str) -> Result<()> {
+        let old_pipeline = {
+            let mut guard = self.video_pipeline.write().await;
+            guard.take()
+        };
+
+        if let Some(pipeline) = old_pipeline {
+            pipeline.stop_and_wait(std::time::Duration::from_secs(3)).await;
+        }
+
+        if self.capture_device.read().await.is_none() {
+            info!("No capture source configured; {} will apply on next pipeline start", reason);
+            return Ok(());
+        }
+
+        let session_ids: Vec<String> = self.sessions.read().await.keys().cloned().collect();
+        if session_ids.is_empty() {
+            info!("No active sessions; {} will apply on next session", reason);
+            return Ok(());
+        }
+
+        let pipeline = self.ensure_video_pipeline().await?;
+        let sessions = self.sessions.read().await;
+        for session_id in &session_ids {
+            if let Some(session) = sessions.get(session_id) {
+                info!("Reconnecting session {} after {}", session_id, reason);
+                let pipeline_for_callback = pipeline.clone();
+                let sid = session_id.clone();
+                let request_keyframe = Arc::new(move || {
+                    let pipeline = pipeline_for_callback.clone();
+                    let sid = sid.clone();
+                    tokio::spawn(async move {
+                        info!("Requesting keyframe for session {} after reconnect", sid);
+                        pipeline.request_keyframe().await;
+                    });
+                });
+                session
+                    .start_from_video_pipeline(pipeline.subscribe(), request_keyframe)
+                    .await;
+            }
+        }
+
+        info!(
+            "Video pipeline restarted after {}, reconnected {} sessions",
+            reason,
+            session_ids.len()
+        );
+        Ok(())
+    }
+
     /// Get list of supported video codecs
     pub fn supported_video_codecs(&self) -> Vec<VideoCodecType> {
         use crate::video::encoder::registry::EncoderRegistry;
@@ -311,6 +355,7 @@ impl WebRtcStreamer {
             bitrate_preset: config.bitrate_preset,
             fps: config.fps,
             encoder_backend: config.encoder_backend,
+            hdr_mode: config.hdr_mode,
         };
 
         info!("Creating shared video pipeline for {:?}", codec);
@@ -495,11 +540,19 @@ impl WebRtcStreamer {
     /// Only restarts the encoding pipeline if configuration actually changed.
     /// This allows multiple consumers (WebRTC, RustDesk) to share the same pipeline
     /// without interrupting each other when they call this method with the same config.
-    pub async fn update_video_config(&self, resolution: Resolution, format: PixelFormat, fps: u32) {
+    pub async fn update_video_config(
+        self: &Arc<Self>,
+        resolution: Resolution,
+        format: PixelFormat,
+        fps: u32,
+        hdr_mode: crate::config::HdrMode,
+    ) -> Result<()> {
         // Check if configuration actually changed
         let config = self.config.read().await;
-        let config_changed =
-            config.resolution != resolution || config.input_format != format || config.fps != fps;
+        let config_changed = config.resolution != resolution
+            || config.input_format != format
+            || config.fps != fps
+            || config.hdr_mode != hdr_mode;
         drop(config);
 
         if !config_changed {
@@ -511,7 +564,7 @@ impl WebRtcStreamer {
                 format,
                 fps
             );
-            return;
+            return Ok(());
         }
 
         // Configuration changed, restart pipeline
@@ -520,56 +573,41 @@ impl WebRtcStreamer {
             resolution.width, resolution.height, format, fps
         );
 
-        // Stop existing pipeline
-        if let Some(ref pipeline) = *self.video_pipeline.read().await {
-            pipeline.stop();
-        }
-        *self.video_pipeline.write().await = None;
-
-        // Close all existing sessions - they need to reconnect
-        let session_count = self.close_all_sessions().await;
-        if session_count > 0 {
-            info!(
-                "Closed {} existing sessions due to config change",
-                session_count
-            );
-        }
-
         // Update config (preserve user-configured bitrate)
         let mut config = self.config.write().await;
         config.resolution = resolution;
         config.input_format = format;
         config.fps = fps;
+        config.hdr_mode = hdr_mode;
         // Note: bitrate is NOT auto-scaled here - use set_bitrate() or config to change it
+        drop(config);
 
+        self.restart_pipeline_preserving_sessions("video config change")
+            .await?;
+
+        let config = self.config.read().await;
         info!(
-            "WebRTC config updated: {}x{} {:?} @ {} fps, {}",
-            resolution.width, resolution.height, format, fps, config.bitrate_preset
+            "WebRTC config updated: {}x{} {:?} @ {} fps, {}, hdr_mode={:?}",
+            resolution.width, resolution.height, format, fps, config.bitrate_preset, config.hdr_mode
         );
+        Ok(())
     }
 
     /// Update encoder backend (software/hardware selection)
-    pub async fn update_encoder_backend(&self, encoder_backend: Option<EncoderBackend>) {
-        // Stop existing pipeline
-        if let Some(ref pipeline) = *self.video_pipeline.read().await {
-            pipeline.stop();
-        }
-        *self.video_pipeline.write().await = None;
-
-        // Close all existing sessions - they need to reconnect with new encoder
-        let session_count = self.close_all_sessions().await;
-        if session_count > 0 {
-            info!(
-                "Closed {} existing sessions due to encoder backend change",
-                session_count
-            );
-        }
-
+    pub async fn update_encoder_backend(self: &Arc<Self>, encoder_backend: Option<EncoderBackend>) -> Result<()> {
         // Update config
         let mut config = self.config.write().await;
+        if config.encoder_backend == encoder_backend {
+            return Ok(());
+        }
         config.encoder_backend = encoder_backend;
+        drop(config);
+
+        self.restart_pipeline_preserving_sessions("encoder backend change")
+            .await?;
 
         info!("WebRTC encoder backend updated: {:?}", encoder_backend);
+        Ok(())
     }
 
     /// Check if current encoder configuration uses hardware encoding

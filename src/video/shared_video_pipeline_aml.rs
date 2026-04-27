@@ -28,6 +28,7 @@ pub struct SharedVideoPipelineConfig {
     pub bitrate_preset: crate::video::encoder::BitratePreset,
     pub fps: u32,
     pub encoder_backend: Option<crate::video::encoder::registry::EncoderBackend>,
+    pub hdr_mode: crate::config::HdrMode,
 }
 
 impl Default for SharedVideoPipelineConfig {
@@ -39,6 +40,7 @@ impl Default for SharedVideoPipelineConfig {
             bitrate_preset: crate::video::encoder::BitratePreset::Balanced,
             fps: 30,
             encoder_backend: None,
+            hdr_mode: crate::config::HdrMode::default(),
         }
     }
 }
@@ -145,6 +147,7 @@ impl SharedVideoPipeline {
             max_width: config.resolution.width,
             max_height: config.resolution.height,
             max_fps: config.fps as f32,
+            hdr_mode: config.hdr_mode,
             output_codec,
             bitrate_kbps: config.bitrate_preset.bitrate_kbps(),
             device: device_path.to_string_lossy().to_string(),

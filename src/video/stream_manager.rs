@@ -354,13 +354,22 @@ impl VideoStreamManager {
     async fn sync_webrtc_capture_source(&self, reason: &str) {
         let (device_path, resolution, format, fps, jpeg_quality) =
             self.streamer.current_capture_config().await;
+        let hdr_mode = if let Some(ref config_store) = *self.config_store.read().await {
+            config_store.get().video.hdr_mode
+        } else {
+            crate::config::HdrMode::default()
+        };
         info!(
             "Syncing WebRTC capture source {}: {}x{} {:?} @ {}fps",
             reason, resolution.width, resolution.height, format, fps
         );
-        self.webrtc_streamer
-            .update_video_config(resolution, format, fps)
-            .await;
+        if let Err(e) = self
+            .webrtc_streamer
+            .update_video_config(resolution, format, fps, hdr_mode)
+            .await
+        {
+            warn!("Failed to sync WebRTC video config: {}", e);
+        }
         if let Some(device_path) = device_path {
             self.webrtc_streamer
                 .set_capture_device(device_path, jpeg_quality)
@@ -502,6 +511,7 @@ impl VideoStreamManager {
         format: PixelFormat,
         resolution: Resolution,
         fps: u32,
+        hdr_mode: crate::config::HdrMode,
     ) -> Result<()> {
         let mode = self.mode.read().await.clone();
 
@@ -512,9 +522,9 @@ impl VideoStreamManager {
 
         if mode == StreamMode::WebRTC {
             self.webrtc_streamer
-                .update_video_config(resolution, format, fps)
-                .await;
-            info!("WebRTC streamer config updated (pipeline stopped, sessions closed)");
+                .update_video_config(resolution, format, fps, hdr_mode)
+                .await?;
+            info!("WebRTC streamer config updated and active sessions reconnected if needed");
         }
 
         self.streamer
@@ -538,8 +548,8 @@ impl VideoStreamManager {
                     actual_resolution.width, actual_resolution.height, actual_format, actual_fps
                 );
                 self.webrtc_streamer
-                    .update_video_config(actual_resolution, actual_format, actual_fps)
-                    .await;
+                    .update_video_config(actual_resolution, actual_format, actual_fps, hdr_mode)
+                    .await?;
             }
             if let Some(device_path) = device_path {
                 info!("Configuring direct capture for WebRTC after config change");

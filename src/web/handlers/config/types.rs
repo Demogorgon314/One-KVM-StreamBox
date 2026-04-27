@@ -37,6 +37,7 @@ pub struct VideoConfigUpdate {
     pub height: Option<u32>,
     pub fps: Option<u32>,
     pub quality: Option<u32>,
+    pub hdr_mode: Option<String>,
 }
 
 impl VideoConfigUpdate {
@@ -56,8 +57,8 @@ impl VideoConfigUpdate {
             }
         }
         if let Some(fps) = self.fps {
-            if !(1..=120).contains(&fps) {
-                return Err(AppError::BadRequest("Invalid fps: must be 1-120".into()));
+            if !(1..=240).contains(&fps) {
+                return Err(AppError::BadRequest("Invalid fps: must be 1-240".into()));
             }
         }
         if let Some(quality) = self.quality {
@@ -65,6 +66,16 @@ impl VideoConfigUpdate {
                 return Err(AppError::BadRequest(
                     "Invalid quality: must be 1-100".into(),
                 ));
+            }
+        }
+        if let Some(ref hdr_mode) = self.hdr_mode {
+            match hdr_mode.as_str() {
+                "auto" | "sdr_only" => {}
+                _ => {
+                    return Err(AppError::BadRequest(
+                        "Invalid hdr_mode: must be 'auto' or 'sdr_only'".into(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -88,6 +99,12 @@ impl VideoConfigUpdate {
         }
         if let Some(quality) = self.quality {
             config.quality = quality;
+        }
+        if let Some(ref hdr_mode) = self.hdr_mode {
+            config.hdr_mode = match hdr_mode.as_str() {
+                "sdr_only" => HdrMode::SdrOnly,
+                _ => HdrMode::Auto,
+            };
         }
     }
 }

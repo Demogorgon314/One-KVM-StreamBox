@@ -377,6 +377,7 @@ const config = ref({
   msd_enabled: false,
   msd_dir: '',
   encoder_backend: 'auto',
+  hdr_mode: 'auto' as string,
   // STUN/TURN settings
   stun_server: '',
   turn_server: '',
@@ -1013,6 +1014,7 @@ async function saveConfig() {
         width: config.value.video_width,
         height: config.value.video_height,
         fps: toConfigFps(config.value.video_fps),
+        hdr_mode: config.value.hdr_mode || undefined,
       })
       await configStore.updateStream({
         encoder: config.value.encoder_backend as any,
@@ -1103,6 +1105,7 @@ async function loadConfig() {
       msd_enabled: msd.enabled || false,
       msd_dir: msd.msd_dir || '',
       encoder_backend: stream.encoder || 'auto',
+      hdr_mode: video.hdr_mode || 'auto',
       // STUN/TURN settings
       stun_server: stream.stun_server || '',
       turn_server: stream.turn_server || '',
@@ -2285,6 +2288,14 @@ watch(() => route.query.tab, (tab) => {
                   <select id="encoder-backend" v-model="config.encoder_backend" class="w-full h-9 px-3 rounded-md border border-input bg-background text-sm">
                     <option value="auto">Hardware Encoder (Auto)</option>
                   </select>
+                </div>
+                <div class="space-y-2">
+                  <Label for="hdr-mode">{{ t('settings.hdrMode') }}</Label>
+                  <select id="hdr-mode" v-model="config.hdr_mode" class="w-full h-9 px-3 rounded-md border border-input bg-background text-sm">
+                    <option value="auto">{{ t('settings.hdrAuto') }}</option>
+                    <option value="sdr_only">{{ t('settings.hdrSdrOnly') }}</option>
+                  </select>
+                  <p class="text-xs text-muted-foreground">{{ t('settings.hdrModeHint') }}</p>
                 </div>
                 <p class="text-xs text-muted-foreground">{{ t('settings.encoderHint') }}</p>
               </CardContent>
