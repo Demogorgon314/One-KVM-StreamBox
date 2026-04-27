@@ -70,7 +70,7 @@ const uploadProgress = ref(0)
 const uploading = ref(false)
 
 // Mount options (using ToggleGroup)
-const mountMode = ref<'cdrom' | 'flash'>('flash')
+const mountMode = ref<'cdrom' | 'flash'>('cdrom')
 const accessMode = ref<'readonly' | 'readwrite'>('readonly')
 
 // Computed properties for API compatibility

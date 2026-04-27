@@ -3063,9 +3063,10 @@ pub async fn msd_connect(
             let manager = ImageManager::new(images_path);
             let image = manager.get(&image_id)?;
 
-            // Get mount options from request (defaults: cdrom=false, read_only=false)
-            let cdrom = req.cdrom.unwrap_or(false);
-            let read_only = req.read_only.unwrap_or(false);
+            // Default ISO images to CD-ROM mode so Windows sees optical media,
+            // not a raw removable disk containing an ISO filesystem.
+            let cdrom = req.cdrom.unwrap_or_else(|| image_is_iso(&image.name));
+            let read_only = req.read_only.unwrap_or(cdrom);
 
             controller.connect_image(&image, cdrom, read_only).await?;
         }
@@ -3081,6 +3082,12 @@ pub async fn msd_connect(
         success: true,
         message: Some("MSD connected".to_string()),
     }))
+}
+
+fn image_is_iso(name: &str) -> bool {
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.eq_ignore_ascii_case("iso"))
+        .unwrap_or(false)
 }
 
 /// Disconnect MSD
