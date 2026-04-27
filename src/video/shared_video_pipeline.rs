@@ -238,6 +238,8 @@ pub struct SharedVideoPipeline {
     stats: Mutex<SharedVideoPipelineStats>,
     running: watch::Sender<bool>,
     running_rx: watch::Receiver<bool>,
+    source_generation: watch::Sender<u64>,
+    source_generation_rx: watch::Receiver<u64>,
     cmd_tx: ParkingRwLock<Option<tokio::sync::mpsc::UnboundedSender<PipelineCmd>>>,
     /// Fast running flag for blocking capture loop
     running_flag: AtomicBool,
@@ -263,6 +265,7 @@ impl SharedVideoPipeline {
         );
 
         let (running_tx, running_rx) = watch::channel(false);
+        let (source_generation_tx, source_generation_rx) = watch::channel(0);
 
         let pipeline = Arc::new(Self {
             config: RwLock::new(config),
@@ -270,6 +273,8 @@ impl SharedVideoPipeline {
             stats: Mutex::new(SharedVideoPipelineStats::default()),
             running: running_tx,
             running_rx,
+            source_generation: source_generation_tx,
+            source_generation_rx,
             cmd_tx: ParkingRwLock::new(None),
             running_flag: AtomicBool::new(false),
             sequence: AtomicU64::new(0),
@@ -368,6 +373,10 @@ impl SharedVideoPipeline {
     /// This is useful for auto-cleanup when the pipeline auto-stops due to no subscribers.
     pub fn running_watch(&self) -> watch::Receiver<bool> {
         self.running_rx.clone()
+    }
+
+    pub fn source_change_watch(&self) -> watch::Receiver<u64> {
+        self.source_generation_rx.clone()
     }
 
     async fn broadcast_encoded(&self, frame: Arc<EncodedVideoFrame>) {

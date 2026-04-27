@@ -37,7 +37,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::audio::{AudioController, OpusFrame};
 use crate::error::{AppError, Result};
-use crate::events::EventBus;
+use crate::events::{EventBus, SystemEvent};
 use crate::hid::HidController;
 use crate::video::encoder::registry::EncoderBackend;
 use crate::video::encoder::registry::VideoEncoderType;
@@ -416,6 +416,35 @@ impl WebRtcStreamer {
                 }
             }
             debug!("Video pipeline monitor task ended");
+        });
+
+        let mut source_rx = pipeline.source_change_watch();
+        let streamer_weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            while source_rx.changed().await.is_ok() {
+                let generation = *source_rx.borrow();
+                if generation == 0 {
+                    continue;
+                }
+
+                let Some(streamer) = streamer_weak.upgrade() else {
+                    break;
+                };
+
+                info!(
+                    "Video source generation {} is ready; notifying clients",
+                    generation
+                );
+
+                let events = { streamer.events.read().await.clone() };
+                if let Some(events) = events {
+                    events.mark_device_info_dirty();
+                    events.publish(SystemEvent::StreamRecovered {
+                        device: "/dev/video_cap".to_string(),
+                    });
+                }
+            }
+            debug!("Video source generation monitor task ended");
         });
 
         *pipeline_guard = Some(pipeline.clone());

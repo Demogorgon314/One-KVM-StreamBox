@@ -106,6 +106,17 @@ impl VfmcapStream {
             VFMCAP_RECONFIGURED => Ok(AcquireResult::Reconfigured(frame)),
             VFMCAP_ERR_TIMEOUT => Ok(AcquireResult::Timeout),
             VFMCAP_ERR_NOSIG => Ok(AcquireResult::NoSignal),
+            VFMCAP_ERR_IOCTL => {
+                let last_error = self.last_error();
+                if is_signal_lost_ioctl_error(&last_error) {
+                    Ok(AcquireResult::NoSignal)
+                } else {
+                    Err(AppError::VideoError(format!(
+                        "vfmcap_acquire_frame failed (rc={}): {}",
+                        rc, last_error
+                    )))
+                }
+            }
             _ => Err(AppError::VideoError(format!(
                 "vfmcap_acquire_frame failed (rc={}): {}",
                 rc,
@@ -172,6 +183,18 @@ impl Drop for VfmcapStream {
             info!("vfmcap closed");
         }
     }
+}
+
+fn is_signal_lost_ioctl_error(error: &str) -> bool {
+    let driver_invalidated = error.contains("Inappropriate ioctl for device")
+        || error.contains("No such device")
+        || error.contains("Input/output error")
+        || error.contains("Broken pipe");
+    let capture_ioctl = error.contains("VIDIOC_DQBUF failed")
+        || error.contains("VFM_CAP_IOC_GET_DMABUF failed")
+        || error.contains("poll() failed");
+
+    driver_invalidated && capture_ioctl
 }
 
 pub struct AmlVfmcapCaptureStream {

@@ -60,17 +60,22 @@ pub struct SharedVideoPipeline {
     subscribers: ParkingRwLock<Vec<tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>>>,
     running: watch::Sender<bool>,
     running_rx: watch::Receiver<bool>,
+    source_generation: watch::Sender<u64>,
+    source_generation_rx: watch::Receiver<u64>,
 }
 
 impl SharedVideoPipeline {
     pub fn new(config: SharedVideoPipelineConfig) -> Result<Arc<Self>> {
         let (running, running_rx) = watch::channel(false);
+        let (source_generation, source_generation_rx) = watch::channel(0);
         Ok(Arc::new(Self {
             config: RwLock::new(config),
             aml_pipeline: Mutex::new(None),
             subscribers: ParkingRwLock::new(Vec::new()),
             running,
             running_rx,
+            source_generation,
+            source_generation_rx,
         }))
     }
 
@@ -124,6 +129,10 @@ impl SharedVideoPipeline {
 
     pub fn running_watch(&self) -> watch::Receiver<bool> {
         self.running_rx.clone()
+    }
+
+    pub fn source_change_watch(&self) -> watch::Receiver<u64> {
+        self.source_generation_rx.clone()
     }
 
     pub async fn start_with_device(
@@ -182,6 +191,19 @@ impl SharedVideoPipeline {
                 if aml_running.changed().await.is_err() {
                     break;
                 }
+            }
+        });
+
+        let mut aml_source_generation = aml.source_change_watch();
+        let source_generation = self.source_generation.clone();
+        tokio::spawn(async move {
+            while aml_source_generation.changed().await.is_ok() {
+                let generation = *aml_source_generation.borrow();
+                let _ = source_generation.send(generation);
+                info!(
+                    "AML source generation changed; notifying shared pipeline (generation={})",
+                    generation
+                );
             }
         });
 

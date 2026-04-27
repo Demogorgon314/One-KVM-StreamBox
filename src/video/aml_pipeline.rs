@@ -1,10 +1,11 @@
 use bytes::Bytes;
 use parking_lot::RwLock as ParkingRwLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::error::{AppError, Result};
 use crate::ffi::multienc::VlImgFormat;
@@ -311,6 +312,8 @@ pub struct AmlPipeline {
     config: AmlPipelineConfig,
     running_rx: watch::Receiver<bool>,
     running: watch::Sender<bool>,
+    source_generation_rx: watch::Receiver<u64>,
+    source_generation: watch::Sender<u64>,
     running_flag: AtomicBool,
     thread_done: AtomicBool,
     sequence: AtomicU64,
@@ -329,10 +332,13 @@ struct PipelineStats {
 impl AmlPipeline {
     pub fn new(config: AmlPipelineConfig) -> Self {
         let (running_tx, running_rx) = watch::channel(false);
+        let (source_generation_tx, source_generation_rx) = watch::channel(0);
         Self {
             config,
             running_rx,
             running: running_tx,
+            source_generation_rx,
+            source_generation: source_generation_tx,
             running_flag: AtomicBool::new(false),
             thread_done: AtomicBool::new(false),
             sequence: AtomicU64::new(0),
@@ -349,6 +355,10 @@ impl AmlPipeline {
 
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.running_rx.clone()
+    }
+
+    pub fn source_change_watch(&self) -> watch::Receiver<u64> {
+        self.source_generation_rx.clone()
     }
 
     pub fn request_keyframe(&self) {
@@ -415,13 +425,15 @@ impl AmlPipeline {
         pipeline: Arc<AmlPipeline>,
         mut encoder: AmlVencEncoder,
         frame_rx: std::sync::mpsc::Receiver<EncodeTask>,
-        release_tx: std::sync::mpsc::Sender<()>,
+        release_tx: std::sync::mpsc::Sender<u32>,
+        encode_active: Arc<AtomicBool>,
         codec: VideoEncoderType,
         fps: u32,
     ) {
-        let mut encode_error_throttler = LogThrottler::with_secs(ENCODE_ERROR_THROTTLE_SECS);
+        let encode_error_throttler = LogThrottler::with_secs(ENCODE_ERROR_THROTTLE_SECS);
 
-        while pipeline.running_flag.load(Ordering::Acquire) {
+        while pipeline.running_flag.load(Ordering::Acquire) && encode_active.load(Ordering::Acquire)
+        {
             // Check for keyframe request before each encode
             if pipeline.keyframe_requested.swap(false, Ordering::AcqRel) {
                 encoder.request_keyframe();
@@ -432,6 +444,16 @@ impl AmlPipeline {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
+
+            if !pipeline.running_flag.load(Ordering::Acquire)
+                || !encode_active.load(Ordering::Acquire)
+            {
+                let _ = release_tx.send(task.index);
+                while let Ok(queued) = frame_rx.try_recv() {
+                    let _ = release_tx.send(queued.index);
+                }
+                break;
+            }
 
             let num_planes = if task.dmabuf_fd2 >= 0 { 2 } else { 1 };
             let stride = match encoder.img_format() {
@@ -472,7 +494,7 @@ impl AmlPipeline {
                 }
             }
 
-            let _ = release_tx.send(());
+            let _ = release_tx.send(task.index);
         }
     }
 
@@ -480,6 +502,9 @@ impl AmlPipeline {
         let config = &self.config;
 
         // Outer loop: handles initial startup and reconfiguration restarts
+        let mut source_generation = 0_u64;
+        let mut source_ready_after_rebuild = false;
+
         'outer: while self.running_flag.load(Ordering::Acquire) {
             let CaptureConfig {
                 mut capture,
@@ -495,8 +520,6 @@ impl AmlPipeline {
                     return;
                 }
             };
-
-            let mut actual_fps = actual_fps;
 
             info!(
                 "AML pipeline: capture opened {}x{} @ {}fps img_format={:?}",
@@ -550,35 +573,45 @@ impl AmlPipeline {
                 }
             }
 
+            if source_ready_after_rebuild {
+                source_generation = source_generation.saturating_add(1);
+                let _ = self.source_generation.send(source_generation);
+                info!(
+                    "AML pipeline: source ready after rebuild (generation={})",
+                    source_generation
+                );
+                source_ready_after_rebuild = false;
+            }
+
             // Create channels for decoupled capture/encode threads
             let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<EncodeTask>(8);
-            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<u32>();
+            let encode_active = Arc::new(AtomicBool::new(true));
 
             // Spawn encode thread
             let pipeline = self.clone();
             let codec = config.output_codec;
             let fps_for_duration = actual_fps;
+            let encode_active_for_thread = encode_active.clone();
             let encode_handle = std::thread::spawn(move || {
                 Self::run_encode_thread(
                     pipeline,
                     encoder,
                     frame_rx,
                     release_tx,
+                    encode_active_for_thread,
                     codec,
                     fps_for_duration,
                 );
             });
 
             // Capture loop state
-            let mut pending_releases: std::collections::VecDeque<DmaBufFrame> =
-                std::collections::VecDeque::new();
+            let mut pending_releases: HashMap<u32, DmaBufFrame> = HashMap::new();
             let mut consecutive_timeouts: u32 = 0;
             let mut consecutive_errors: u32 = 0;
-            let mut source_change_detected = false;
             let mut frame_count: u64 = 0;
             let mut fps_frame_count: u64 = 0;
             let mut last_fps_time = Instant::now();
-            let mut current_resolution = actual_resolution;
             let mut last_subscriber_log = Instant::now();
             let mut should_recreate = false;
 
@@ -595,9 +628,12 @@ impl AmlPipeline {
                 let event = capture.poll_event(0);
                 if event == crate::ffi::vfmcap::VFMCAP_EVENT_SOURCE_CHANGE {
                     info!("AML pipeline: source change event detected");
-                    source_change_detected = true;
+                    should_recreate = true;
+                    break;
                 } else if event == crate::ffi::vfmcap::VFMCAP_EVENT_NOSIG {
-                    trace!("AML pipeline: no signal");
+                    info!("AML pipeline: signal lost/unstable event detected");
+                    should_recreate = true;
+                    break;
                 }
 
                 let capture_result = match capture.next_frame() {
@@ -617,16 +653,13 @@ impl AmlPipeline {
                                 break;
                             }
                         } else if e.kind() == std::io::ErrorKind::NotConnected {
-                            trace!("AML: no signal");
-                            std::thread::sleep(Duration::from_millis(100));
+                            info!("AML pipeline: signal lost during capture, rebuilding after stable signal");
+                            should_recreate = true;
+                            break;
                         } else {
                             consecutive_errors += 1;
                             if consecutive_errors <= 3 {
                                 error!("AML capture error: {}", e);
-                            }
-                            if source_change_detected {
-                                info!("AML pipeline: stopping after source change (Vulkan pipeline broken, {} errors), will restart on next session", consecutive_errors);
-                                break;
                             }
                             if consecutive_errors >= CAPTURE_TIMEOUT_STOP_THRESHOLD {
                                 warn!(
@@ -650,15 +683,12 @@ impl AmlPipeline {
                     }
                 }
 
-                if capture_result.reconfigured || source_change_detected {
-                    let new_res = capture_result.resolution;
+                if capture_result.reconfigured {
                     capture.release_frame(&capture_result.frame);
 
-                    let old_width = current_resolution.width;
-                    let old_height = current_resolution.height;
                     info!(
                         "AML pipeline: source changed (was {}x{}), tearing down capture+encoder for full rebuild",
-                        old_width, old_height
+                        actual_resolution.width, actual_resolution.height
                     );
 
                     should_recreate = true;
@@ -667,8 +697,6 @@ impl AmlPipeline {
 
                 if let FrameData::DmaBuf(dma) = capture_result.frame {
                     if has_subscribers {
-                        pending_releases.push_back(dma);
-
                         let task = EncodeTask {
                             index: dma.index,
                             dmabuf_fd: dma.dmabuf_fd,
@@ -681,6 +709,7 @@ impl AmlPipeline {
                             sequence: frame_count,
                             timestamp_us: dma.timestamp_us,
                         };
+                        pending_releases.insert(task.index, dma);
 
                         if let Err(_) = frame_tx.send(task) {
                             // Encode thread died
@@ -696,8 +725,8 @@ impl AmlPipeline {
                 }
 
                 // Process release notifications from encode thread
-                while let Ok(()) = release_rx.try_recv() {
-                    if let Some(dma) = pending_releases.pop_front() {
+                while let Ok(index) = release_rx.try_recv() {
+                    if let Some(dma) = pending_releases.remove(&index) {
                         capture.release_frame(&FrameData::DmaBuf(dma));
                     }
                 }
@@ -715,8 +744,19 @@ impl AmlPipeline {
             }
 
             // Stop encode thread
+            encode_active.store(false, Ordering::Release);
             drop(frame_tx);
             let _ = encode_handle.join();
+
+            while let Ok(index) = release_rx.try_recv() {
+                if let Some(dma) = pending_releases.remove(&index) {
+                    capture.release_frame(&FrameData::DmaBuf(dma));
+                }
+            }
+
+            for (_, dma) in pending_releases.drain() {
+                capture.release_frame(&FrameData::DmaBuf(dma));
+            }
 
             if !should_recreate {
                 break 'outer;
@@ -743,6 +783,7 @@ impl AmlPipeline {
                 "AML pipeline: rebuilding for {}x{}",
                 target_res.width, target_res.height
             );
+            source_ready_after_rebuild = true;
         }
 
         self.running_flag.store(false, Ordering::Release);

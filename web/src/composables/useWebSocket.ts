@@ -17,6 +17,8 @@ type EventHandler = (data: any) => void
 let wsInstance: WebSocket | null = null
 let handlers = new Map<string, EventHandler[]>()
 let subscribedTopics: string[] = []
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let connectPromise: Promise<void> | null = null
 const connected = ref(false)
 const reconnectAttempts = ref(0)
 const networkError = ref(false)
@@ -47,27 +49,52 @@ function syncSubscriptions() {
   }
 }
 
-function connect() {
+function scheduleReconnect() {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+  }
+  reconnectAttempts.value++
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    void connect()
+  }, WS_RECONNECT_DELAY)
+}
+
+function connect(): Promise<void> {
   if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
     syncSubscriptions()
-    return
+    return Promise.resolve()
+  }
+
+  if (wsInstance && wsInstance.readyState === WebSocket.CONNECTING && connectPromise) {
+    return connectPromise
   }
 
   const url = buildWsUrl('/api/ws')
 
   try {
-    wsInstance = new WebSocket(url)
+    const ws = new WebSocket(url)
+    wsInstance = ws
 
-    wsInstance.onopen = () => {
+    connectPromise = new Promise((resolve) => {
+      ws.onopen = () => {
+        if (wsInstance !== ws) {
+          resolve()
+          return
+        }
+
       connected.value = true
       networkError.value = false
       networkErrorMessage.value = null
       reconnectAttempts.value = 0
+        connectPromise = null
 
       syncSubscriptions()
+        resolve()
     }
 
-    wsInstance.onmessage = (e) => {
+      ws.onmessage = (e) => {
+        if (wsInstance !== ws) return
       try {
         const event: WsEvent = JSON.parse(e.data)
 
@@ -81,30 +108,53 @@ function connect() {
       }
     }
 
-    wsInstance.onclose = () => {
+      ws.onclose = () => {
+        if (wsInstance !== ws) return
+
       connected.value = false
       networkError.value = true
+        wsInstance = null
+        connectPromise = null
 
       // Auto-reconnect with infinite retry
-      reconnectAttempts.value++
-      setTimeout(connect, WS_RECONNECT_DELAY)
+        scheduleReconnect()
     }
 
-    wsInstance.onerror = () => {
+      ws.onerror = () => {
+        if (wsInstance !== ws) return
       networkError.value = true
       networkErrorMessage.value = 'Network connection failed'
     }
+    })
+
+    return connectPromise
   } catch (err) {
     console.error('[WebSocket] Failed to create connection:', err)
+    return Promise.resolve()
   }
 }
 
 function disconnect() {
-  if (wsInstance) {
-    wsInstance.close()
-    wsInstance = null
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
   }
+
+  const ws = wsInstance
+  wsInstance = null
+  connectPromise = null
   subscribedTopics = []
+  connected.value = false
+
+  if (ws) {
+    ws.close()
+  }
+}
+
+async function reconnect() {
+  disconnect()
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await connect()
 }
 
 function subscribe(topics: string[]) {
@@ -167,6 +217,7 @@ export function useWebSocket() {
     subscribe,
     connect,
     disconnect,
+    reconnect,
   }
 }
 

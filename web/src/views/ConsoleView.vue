@@ -64,7 +64,7 @@ const router = useRouter()
 const systemStore = useSystemStore()
 const configStore = useConfigStore()
 const authStore = useAuthStore()
-const { connected: wsConnected, networkError: wsNetworkError } = useWebSocket()
+const { connected: wsConnected, networkError: wsNetworkError, reconnect: reconnectWs } = useWebSocket()
 const hidWs = useHidWebSocket()
 const webrtc = useWebRTC()
 const unifiedAudio = getUnifiedAudio()
@@ -575,6 +575,17 @@ let webrtcRecoveryTimerId: number | null = null
 let webrtcRecoveryAttempts = 0
 const MAX_WEBRTC_RECOVERY_ATTEMPTS = 8
 const WEBRTC_RECOVERY_BASE_DELAY = 2000
+const WEBRTC_SOURCE_RECOVERY_DELAYS_MS = [2000, 4000, 8000]
+const WEBRTC_HEALTHY_FPS_THRESHOLD = 10
+const WEBRTC_HEALTHY_FPS_MAX_AGE_MS = 2500
+const WEBRTC_RECOVERED_HEALTH_DELAY_MS = 3000
+const WEBRTC_SOURCE_RESTART_DELAY_MS = 750
+let lastHealthyWebRTCFramesAt = 0
+let sourceRecoveryCheckTimerId: number | null = null
+let pendingWebRTCSourceRestart = false
+let pendingWebRTCSourceRestartReason = ''
+
+const webrtcVideoElementKey = ref(0)
 
 // Last-frame overlay (prevents black flash during mode switches)
 const frameOverlayUrl = ref<string | null>(null)
@@ -825,8 +836,8 @@ function scheduleWebRTCRecovery() {
     webrtcRecoveryTimerId = null
     webrtcRecoveryAttempts++
 
-    // Only reconnect if we are still in a WebRTC mode and error state
-    if (videoMode.value === 'mjpeg' || !videoError.value) {
+    // Only reconnect if we are still in an active WebRTC console.
+    if (videoMode.value === 'mjpeg' || !isConsoleActive.value) {
       webrtcRecoveryAttempts = 0
       return
     }
@@ -834,6 +845,7 @@ function scheduleWebRTCRecovery() {
     console.log(`[Recovery] Attempting WebRTC reconnect (attempt ${webrtcRecoveryAttempts})`)
     try {
       await webrtc.disconnect()
+      await reconnectWs()
       const ok = await connectWebRTCSerial('device-recovery')
       if (ok) {
         console.log('[Recovery] WebRTC reconnected successfully')
@@ -858,17 +870,68 @@ function cancelWebRTCRecovery() {
   webrtcRecoveryAttempts = 0
 }
 
+function clearSourceRecoveryCheckTimer() {
+  if (sourceRecoveryCheckTimerId !== null) {
+    clearTimeout(sourceRecoveryCheckTimerId)
+    sourceRecoveryCheckTimerId = null
+  }
+}
+
+async function resetWebRTCVideoElement() {
+  if (webrtcVideoRef.value) {
+    webrtcVideoRef.value.pause()
+    webrtcVideoRef.value.srcObject = null
+    webrtcVideoRef.value.removeAttribute('src')
+    webrtcVideoRef.value.load()
+  }
+
+  webrtcVideoElementKey.value++
+  await nextTick()
+  unifiedAudio.setWebRTCElement(webrtcVideoRef.value)
+}
+
 function handleStreamRecovered(_data: { device: string }) {
   if (!isConsoleActive.value) return
 
   // Cancel any pending recovery timer – backend is back
   cancelWebRTCRecovery()
+  clearSourceRecoveryCheckTimer()
 
   // Reset video error state
   videoError.value = false
   videoErrorMessage.value = ''
-  // Refresh video stream
-  refreshVideo()
+  if (videoMode.value !== 'mjpeg') {
+    if (pendingWebRTCSourceRestart) {
+      const reason = pendingWebRTCSourceRestartReason || 'source signal change'
+      pendingWebRTCSourceRestart = false
+      pendingWebRTCSourceRestartReason = ''
+
+      sourceRecoveryCheckTimerId = window.setTimeout(() => {
+        sourceRecoveryCheckTimerId = null
+        reconnectWebRTCForSourceChange(reason)
+      }, WEBRTC_SOURCE_RESTART_DELAY_MS)
+      return
+    }
+
+    if (hasHealthyWebRTCFrames()) {
+      void rebindWebRTCVideo()
+      return
+    }
+
+    sourceRecoveryCheckTimerId = window.setTimeout(() => {
+      sourceRecoveryCheckTimerId = null
+      if (videoMode.value === 'mjpeg' || !isConsoleActive.value) return
+      if (hasHealthyWebRTCFrames()) {
+        void rebindWebRTCVideo()
+        return
+      }
+      if (!webrtc.isConnecting.value) {
+        reconnectWebRTCForSourceChange('stream recovered health check')
+      }
+    }, WEBRTC_RECOVERED_HEALTH_DELAY_MS)
+  } else {
+    refreshVideo()
+  }
 }
 
 async function handleAudioStateChanged(data: { streaming: boolean; device: string | null }) {
@@ -1061,6 +1124,74 @@ function handleStreamStatsUpdate(data: any) {
 let initialDeviceInfoReceived = false
 let initialModeRestoreDone = false
 let initialModeRestoreInProgress = false
+let webRtcSourceReconnectTask: Promise<void> | null = null
+
+function streamSourceSignature(stream: { resolution: [number, number] | null; format: string | null; targetFps: number } | null | undefined): string | null {
+  const resolution = stream?.resolution
+  if (!resolution) return null
+  return `${resolution[0]}x${resolution[1]}:${stream.format ?? ''}:${stream.targetFps ?? 0}`
+}
+
+function reconnectWebRTCForSourceChange(reason: string) {
+  if (webRtcSourceReconnectTask) return
+  if (videoMode.value === 'mjpeg' || !isConsoleActive.value || videoRestarting.value || webrtc.isConnecting.value || videoSession.localSwitching.value || videoSession.backendSwitching.value) {
+    return
+  }
+
+  webRtcSourceReconnectTask = (async () => {
+    pendingWebRTCReadyGate = false
+    videoRestarting.value = true
+    videoLoading.value = true
+    backendFps.value = 0
+    lastHealthyWebRTCFramesAt = 0
+
+    try {
+      await captureFrameOverlay()
+      let ok = false
+      for (let attempt = 0; attempt < WEBRTC_SOURCE_RECOVERY_DELAYS_MS.length; attempt++) {
+        if (videoMode.value === 'mjpeg' || !isConsoleActive.value) break
+
+        const delay = WEBRTC_SOURCE_RECOVERY_DELAYS_MS[attempt] ?? 30000
+        if (delay > 0) {
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
+
+        try {
+          await webrtc.disconnect()
+          await reconnectWs()
+          await resetWebRTCVideoElement()
+          const attemptOk = await connectWebRTCSerial(`${reason} attempt ${attempt + 1}`)
+          if (!attemptOk) {
+            continue
+          }
+
+          await rebindWebRTCVideo()
+          ok = true
+          break
+        } catch {
+          // Try again below with backoff.
+        }
+      }
+
+      if (ok) {
+        videoError.value = false
+        videoErrorMessage.value = ''
+        videoLoading.value = false
+        systemStore.setStreamOnline(true)
+      } else if (videoMode.value !== 'mjpeg' && isConsoleActive.value) {
+        reloadPageForWebRTCRecovery('WebRTC recovery attempts failed')
+      }
+    } finally {
+      videoRestarting.value = false
+      webRtcSourceReconnectTask = null
+    }
+  })()
+}
+
+function hasHealthyWebRTCFrames(): boolean {
+  if (!webrtc.isConnected.value) return false
+  return Date.now() - lastHealthyWebRTCFramesAt <= WEBRTC_HEALTHY_FPS_MAX_AGE_MS
+}
 
 function normalizeServerMode(mode: string | undefined): VideoMode | null {
   if (!mode) return null
@@ -1095,9 +1226,11 @@ async function restoreInitialMode(serverMode: VideoMode) {
 }
 
 function handleDeviceInfo(data: any) {
+  const prevSourceSignature = streamSourceSignature(systemStore.stream)
   const prevAudioStreaming = systemStore.audio?.streaming ?? false
   const prevAudioDevice = systemStore.audio?.device ?? null
   systemStore.updateFromDeviceInfo(data)
+  const nextSourceSignature = streamSourceSignature(systemStore.stream)
   ttydStatus.value = data.ttyd ?? null
 
   const nextAudioStreaming = systemStore.audio?.streaming ?? false
@@ -1116,6 +1249,15 @@ function handleDeviceInfo(data: any) {
   // This prevents false-positive mode changes during config switching
   if (data.video?.config_changing) {
     return
+  }
+
+  if (prevSourceSignature && nextSourceSignature && prevSourceSignature !== nextSourceSignature) {
+    console.log(`[WebRTC] Source changed ${prevSourceSignature} -> ${nextSourceSignature}; waiting for backend recovery signal`)
+    if (videoMode.value !== 'mjpeg') {
+      pendingWebRTCSourceRestart = true
+      pendingWebRTCSourceRestartReason = `source signal change ${prevSourceSignature} -> ${nextSourceSignature}`
+      void captureFrameOverlay()
+    }
   }
 
   if (!isConsoleActive.value) return
@@ -1172,6 +1314,21 @@ const isModeSwitching = videoSession.localSwitching
 
 function reloadPage() {
   window.location.reload()
+}
+
+function reloadPageForWebRTCRecovery(reason: string) {
+  const key = 'one-kvm-webrtc-recovery-reload-at'
+  const now = Date.now()
+  const last = Number(sessionStorage.getItem(key) || '0')
+
+  if (now - last > 30000) {
+    console.warn(`[WebRTC] ${reason}; reloading page to reset WebRTC state`)
+    sessionStorage.setItem(key, String(now))
+    window.location.reload()
+    return
+  }
+
+  markWebRTCFailure(t('console.webrtcFailed'))
 }
 
 function refreshVideo() {
@@ -1489,7 +1646,11 @@ watch(webrtcVideoRef, (el) => {
 // Watch the ref directly with deep: true to detect property changes
 watch(webrtc.stats, (stats) => {
   if (videoMode.value !== 'mjpeg' && stats.framesPerSecond > 0) {
-    backendFps.value = Math.round(stats.framesPerSecond)
+    const fps = Math.round(stats.framesPerSecond)
+    backendFps.value = fps
+    if (fps >= WEBRTC_HEALTHY_FPS_THRESHOLD) {
+      lastHealthyWebRTCFramesAt = Date.now()
+    }
     // WebRTC is receiving frames, set stream online
     systemStore.setStreamOnline(true)
     // Update aspect ratio from WebRTC video dimensions
@@ -1521,6 +1682,7 @@ watch(() => webrtc.state.value, (newState, oldState) => {
       systemStore.setStreamOnline(true)
       webrtcReconnectFailures = 0
     } else if (newState === 'disconnected' || newState === 'failed') {
+      lastHealthyWebRTCFramesAt = 0
       // Don't immediately set offline - wait for potential reconnect
       // The device_info event will eventually sync the correct state
     }
@@ -2222,6 +2384,9 @@ function deactivateConsoleView() {
   exitPointerLock()
   unregisterInteractionListeners()
   cancelWebRTCRecovery()
+  clearSourceRecoveryCheckTimer()
+  pendingWebRTCSourceRestart = false
+  pendingWebRTCSourceRestartReason = ''
 
   if (webrtcReconnectTimeout) {
     clearTimeout(webrtcReconnectTimeout)
@@ -2362,6 +2527,9 @@ onUnmounted(() => {
     gracePeriodTimeoutId = null
   }
   cancelWebRTCRecovery()
+  clearSourceRecoveryCheckTimer()
+  pendingWebRTCSourceRestart = false
+  pendingWebRTCSourceRestartReason = ''
   videoSession.clearWaiters()
 
   // Reset counters
@@ -2584,6 +2752,7 @@ onUnmounted(() => {
           <!-- Note: muted is controlled by unifiedAudio, not hardcoded -->
           <video
             v-show="videoMode !== 'mjpeg'"
+            :key="webrtcVideoElementKey"
             data-testid="webrtc-stream"
             ref="webrtcVideoRef"
             class="w-full h-full object-contain"

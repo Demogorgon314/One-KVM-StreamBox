@@ -15,9 +15,9 @@ use hwcodec::ffmpeg_hw::{
 use tracing::info;
 
 #[cfg(feature = "aml")]
-use crate::video::encoder::aml_venc::AmlVencEncoder;
-#[cfg(feature = "aml")]
 use crate::ffi::multienc::{VlCodecId, VlImgFormat};
+#[cfg(feature = "aml")]
+use crate::video::encoder::aml_venc::AmlVencEncoder;
 
 use super::SharedVideoPipelineConfig;
 
