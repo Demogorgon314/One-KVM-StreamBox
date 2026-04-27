@@ -2,7 +2,7 @@ use crate::config::*;
 use crate::error::AppError;
 use crate::rtsp::RtspServiceStatus;
 use crate::rustdesk::config::RustDeskConfig;
-use crate::video::encoder::BitratePreset;
+use crate::video::encoder::{BitratePreset, GopPreset};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -118,6 +118,8 @@ pub struct StreamConfigResponse {
     pub mode: StreamMode,
     pub encoder: EncoderType,
     pub bitrate_preset: BitratePreset,
+    pub gop_preset: GopPreset,
+    pub gop_interval_seconds: f32,
     /// Whether public ICE servers are available (compile-time decision)
     pub has_public_ice_servers: bool,
     /// Whether public ICE servers are currently in use (when STUN/TURN are unset)
@@ -136,6 +138,8 @@ impl From<&StreamConfig> for StreamConfigResponse {
             mode: config.mode.clone(),
             encoder: config.encoder.clone(),
             bitrate_preset: config.bitrate_preset,
+            gop_preset: config.gop_preset,
+            gop_interval_seconds: config.gop_interval_seconds,
             has_public_ice_servers: public_ice::is_configured(),
             using_public_ice_servers: config.is_using_public_ice_servers(),
             stun_server: config.stun_server.clone(),
@@ -152,6 +156,8 @@ pub struct StreamConfigUpdate {
     pub mode: Option<StreamMode>,
     pub encoder: Option<EncoderType>,
     pub bitrate_preset: Option<BitratePreset>,
+    pub gop_preset: Option<GopPreset>,
+    pub gop_interval_seconds: Option<f32>,
     /// STUN server URL (e.g., "stun:stun.l.google.com:19302")
     /// Leave empty to use public ICE servers
     pub stun_server: Option<String>,
@@ -166,7 +172,20 @@ pub struct StreamConfigUpdate {
 
 impl StreamConfigUpdate {
     pub fn validate(&self) -> crate::error::Result<()> {
-        // BitratePreset is always valid (enum)
+        if let Some(BitratePreset::Custom(kbps)) = self.bitrate_preset {
+            if !(250..=100_000).contains(&kbps) {
+                return Err(AppError::BadRequest(
+                    "Custom bitrate must be between 250 and 100000 kbps".into(),
+                ));
+            }
+        }
+        if let Some(interval) = self.gop_interval_seconds {
+            if !(0.1..=10.0).contains(&interval) {
+                return Err(AppError::BadRequest(
+                    "GOP interval must be between 0.1 and 10.0 seconds".into(),
+                ));
+            }
+        }
         // Validate STUN server format
         if let Some(ref stun) = self.stun_server {
             if !stun.is_empty() && !stun.starts_with("stun:") {
@@ -196,6 +215,15 @@ impl StreamConfigUpdate {
         }
         if let Some(preset) = self.bitrate_preset {
             config.bitrate_preset = preset;
+        }
+        if let Some(preset) = self.gop_preset {
+            config.gop_preset = preset;
+            if self.gop_interval_seconds.is_none() {
+                config.gop_interval_seconds = preset.interval_seconds(config.gop_interval_seconds);
+            }
+        }
+        if let Some(interval) = self.gop_interval_seconds {
+            config.gop_interval_seconds = interval;
         }
         // STUN/TURN settings - empty string means clear (use public servers), Some("value") means set custom
         if let Some(ref stun) = self.stun_server {

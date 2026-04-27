@@ -88,6 +88,10 @@ pub struct SharedVideoPipelineConfig {
     pub output_codec: VideoEncoderType,
     /// Bitrate preset (replaces raw bitrate_kbps)
     pub bitrate_preset: crate::video::encoder::BitratePreset,
+    /// GOP preset
+    pub gop_preset: crate::video::encoder::GopPreset,
+    /// Custom GOP interval in seconds
+    pub gop_interval_seconds: f32,
     /// Target FPS
     pub fps: u32,
     /// Encoder backend (None = auto select best available)
@@ -101,6 +105,8 @@ impl Default for SharedVideoPipelineConfig {
             input_format: PixelFormat::Yuyv,
             output_codec: VideoEncoderType::H264,
             bitrate_preset: crate::video::encoder::BitratePreset::Balanced,
+            gop_preset: crate::video::encoder::GopPreset::Balanced,
+            gop_interval_seconds: 1.0,
             fps: 30,
             encoder_backend: None,
         }
@@ -115,7 +121,8 @@ impl SharedVideoPipelineConfig {
 
     /// Get effective GOP size
     pub fn gop_size(&self) -> u32 {
-        self.bitrate_preset.gop_size(self.fps)
+        self.gop_preset
+            .gop_size(self.fps, self.gop_interval_seconds)
     }
 
     /// Create H264 config with bitrate preset
@@ -887,19 +894,36 @@ impl SharedVideoPipeline {
         }
     }
 
-    /// Set bitrate using preset
-    pub async fn set_bitrate_preset(
+    /// Set bitrate and GOP using presets
+    pub async fn set_encoding_config(
         &self,
         preset: crate::video::encoder::BitratePreset,
+        gop_preset: crate::video::encoder::GopPreset,
+        gop_interval_seconds: f32,
     ) -> Result<()> {
         let bitrate_kbps = preset.bitrate_kbps();
         let gop = {
             let mut config = self.config.write().await;
             config.bitrate_preset = preset;
+            config.gop_preset = gop_preset;
+            config.gop_interval_seconds = gop_interval_seconds;
             config.gop_size()
         };
         self.send_cmd(PipelineCmd::SetBitrate { bitrate_kbps, gop });
         Ok(())
+    }
+
+    /// Set bitrate using preset
+    pub async fn set_bitrate_preset(
+        &self,
+        preset: crate::video::encoder::BitratePreset,
+    ) -> Result<()> {
+        let (gop_preset, gop_interval_seconds) = {
+            let config = self.config.read().await;
+            (config.gop_preset, config.gop_interval_seconds)
+        };
+        self.set_encoding_config(preset, gop_preset, gop_interval_seconds)
+            .await
     }
 
     /// Set bitrate using raw kbps value (converts to appropriate preset)

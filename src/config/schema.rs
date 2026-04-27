@@ -1,4 +1,4 @@
-use crate::video::encoder::BitratePreset;
+use crate::video::encoder::{BitratePreset, GopPreset};
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
@@ -684,8 +684,12 @@ pub struct StreamConfig {
     pub mode: StreamMode,
     /// Encoder type for H264/H265
     pub encoder: EncoderType,
-    /// Bitrate preset (Speed/Balanced/Quality)
+    /// Bitrate preset (Speed/Balanced/Quality/Custom)
     pub bitrate_preset: BitratePreset,
+    /// GOP preset (LowLatency/Balanced/Quality/Custom)
+    pub gop_preset: GopPreset,
+    /// GOP interval in seconds when using a custom GOP preset
+    pub gop_interval_seconds: f32,
     /// Custom STUN server (e.g., "stun:stun.l.google.com:19302")
     /// If empty, uses public ICE servers from secrets.toml
     pub stun_server: Option<String>,
@@ -713,6 +717,8 @@ impl Default for StreamConfig {
             mode: StreamMode::WebRTC,
             encoder: EncoderType::Auto,
             bitrate_preset: BitratePreset::Balanced,
+            gop_preset: GopPreset::Balanced,
+            gop_interval_seconds: 1.0,
             // Empty means use public ICE servers (like RustDesk)
             stun_server: None,
             turn_server: None,

@@ -50,7 +50,7 @@ use crate::video::shared_video_pipeline::{
 use super::config::{TurnServer, WebRtcConfig};
 use super::signaling::{ConnectionState, IceCandidate, SdpAnswer, SdpOffer};
 use super::universal_session::{UniversalSession, UniversalSessionConfig};
-use crate::video::encoder::BitratePreset;
+use crate::video::encoder::{BitratePreset, GopPreset};
 
 /// WebRTC streamer configuration
 #[derive(Debug, Clone)]
@@ -60,6 +60,8 @@ pub struct WebRtcStreamerConfig {
     pub resolution: Resolution,
     pub input_format: PixelFormat,
     pub bitrate_preset: BitratePreset,
+    pub gop_preset: GopPreset,
+    pub gop_interval_seconds: f32,
     pub fps: u32,
     pub audio_enabled: bool,
     pub encoder_backend: Option<EncoderBackend>,
@@ -74,6 +76,8 @@ impl Default for WebRtcStreamerConfig {
             resolution: Resolution::HD720,
             input_format: PixelFormat::Mjpeg,
             bitrate_preset: BitratePreset::Balanced,
+            gop_preset: GopPreset::Balanced,
+            gop_interval_seconds: 1.0,
             fps: 30,
             audio_enabled: false,
             encoder_backend: None,
@@ -359,6 +363,8 @@ impl WebRtcStreamer {
             input_format: config.input_format,
             output_codec: Self::codec_type_to_encoder_type(codec),
             bitrate_preset: config.bitrate_preset,
+            gop_preset: config.gop_preset,
+            gop_interval_seconds: config.gop_interval_seconds,
             fps: config.fps,
             encoder_backend: config.encoder_backend,
             hdr_mode: config.hdr_mode,
@@ -1048,20 +1054,38 @@ impl WebRtcStreamer {
         }
     }
 
-    /// Set bitrate using preset
+    /// Set bitrate/GOP encoding config.
     ///
-    /// Note: Hardware encoders (VAAPI, NVENC, etc.) don't support dynamic bitrate changes.
-    /// This method restarts the pipeline to apply the new bitrate only if the preset actually changed.
-    pub async fn set_bitrate_preset(self: &Arc<Self>, preset: BitratePreset) -> Result<()> {
-        // Check if preset actually changed
-        let current_preset = self.config.read().await.bitrate_preset;
-        if current_preset == preset {
-            trace!("Bitrate preset unchanged: {}", preset);
+    /// Note: Hardware encoders (VAAPI, NVENC, etc.) don't support every dynamic update.
+    /// This method restarts the pipeline when the effective encoding config changes.
+    pub async fn set_encoding_config(
+        self: &Arc<Self>,
+        preset: BitratePreset,
+        gop_preset: GopPreset,
+        gop_interval_seconds: f32,
+    ) -> Result<()> {
+        let changed = {
+            let mut config = self.config.write().await;
+            let changed = config.bitrate_preset != preset
+                || config.gop_preset != gop_preset
+                || (config.gop_interval_seconds - gop_interval_seconds).abs() > f32::EPSILON;
+            if changed {
+                config.bitrate_preset = preset;
+                config.gop_preset = gop_preset;
+                config.gop_interval_seconds = gop_interval_seconds;
+            }
+            changed
+        };
+
+        if !changed {
+            trace!(
+                "Encoding config unchanged: bitrate={}, gop={}, interval={}s",
+                preset,
+                gop_preset,
+                gop_interval_seconds
+            );
             return Ok(());
         }
-
-        // Update config
-        self.config.write().await.bitrate_preset = preset;
 
         // Check if pipeline exists and is running
         let pipeline_running = {
@@ -1073,18 +1097,19 @@ impl WebRtcStreamer {
         };
 
         if pipeline_running {
-            info!("Restarting video pipeline to apply new bitrate: {}", preset);
+            info!(
+                "Restarting video pipeline to apply encoding config: bitrate={}, gop={}, interval={}s",
+                preset, gop_preset, gop_interval_seconds
+            );
 
-            // Stop existing pipeline
-            if let Some(ref pipeline) = *self.video_pipeline.read().await {
-                pipeline.stop();
+            let old_pipeline = {
+                let mut guard = self.video_pipeline.write().await;
+                guard.take()
+            };
+
+            if let Some(pipeline) = old_pipeline {
+                pipeline.stop_and_wait(Duration::from_secs(3)).await;
             }
-
-            // Wait for pipeline to stop
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Clear pipeline reference - will be recreated
-            *self.video_pipeline.write().await = None;
 
             let has_source = self.capture_device.read().await.is_some();
             if !has_source {
@@ -1116,19 +1141,31 @@ impl WebRtcStreamer {
                 }
 
                 info!(
-                    "Video pipeline restarted with {}, reconnected {} sessions",
+                    "Video pipeline restarted with bitrate={}, gop={}, interval={}s, reconnected {} sessions",
                     preset,
+                    gop_preset,
+                    gop_interval_seconds,
                     session_ids.len()
                 );
             }
         } else {
             debug!(
-                "Pipeline not running, bitrate {} will apply on next start",
-                preset
+                "Pipeline not running, encoding config bitrate={}, gop={}, interval={}s will apply on next start",
+                preset, gop_preset, gop_interval_seconds
             );
         }
 
         Ok(())
+    }
+
+    /// Set bitrate using preset.
+    pub async fn set_bitrate_preset(self: &Arc<Self>, preset: BitratePreset) -> Result<()> {
+        let (gop_preset, gop_interval_seconds) = {
+            let config = self.config.read().await;
+            (config.gop_preset, config.gop_interval_seconds)
+        };
+        self.set_encoding_config(preset, gop_preset, gop_interval_seconds)
+            .await
     }
 }
 

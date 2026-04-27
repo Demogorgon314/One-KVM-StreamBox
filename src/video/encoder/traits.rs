@@ -17,18 +17,33 @@ use crate::video::format::{PixelFormat, Resolution};
 #[serde(tag = "type", content = "value")]
 #[derive(Default)]
 pub enum BitratePreset {
-    /// Speed priority: 1 Mbps, lowest latency, smaller GOP
+    /// Speed priority: 1 Mbps, lowest bandwidth
     /// Best for: slow networks, remote management, low-bandwidth scenarios
     Speed,
     /// Balanced: 4 Mbps, good quality/latency tradeoff
     /// Best for: typical usage, recommended default
     #[default]
     Balanced,
-    /// Quality priority: 8 Mbps, best visual quality
+    /// Quality priority: 16 Mbps, best visual quality
     /// Best for: local network, high-bandwidth scenarios, detailed work
     Quality,
     /// Custom bitrate in kbps (for advanced users)
     Custom(u32),
+}
+
+/// GOP interval preset for video encoding
+#[typeshare]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum GopPreset {
+    /// Short GOP: 0.5 seconds, faster recovery and lower latency
+    LowLatency,
+    /// Balanced GOP: 1 second
+    #[default]
+    Balanced,
+    /// Longer GOP: 2 seconds, better compression efficiency
+    Quality,
+    /// Use the explicit gop_interval_seconds config value
+    Custom,
 }
 
 impl BitratePreset {
@@ -37,21 +52,8 @@ impl BitratePreset {
         match self {
             Self::Speed => 1000,
             Self::Balanced => 4000,
-            Self::Quality => 8000,
+            Self::Quality => 16000,
             Self::Custom(kbps) => *kbps,
-        }
-    }
-
-    /// Get recommended GOP size based on preset
-    ///
-    /// Speed preset uses shorter GOP for faster recovery from packet loss.
-    /// Quality preset uses longer GOP for better compression efficiency.
-    pub fn gop_size(&self, fps: u32) -> u32 {
-        match self {
-            Self::Speed => (fps / 2).max(15), // 0.5 second, minimum 15 frames
-            Self::Balanced => fps,            // 1 second
-            Self::Quality => fps * 2,         // 2 seconds
-            Self::Custom(_) => fps,           // Default 1 second for custom
         }
     }
 
@@ -65,14 +67,34 @@ impl BitratePreset {
         }
     }
 
-    /// Create from kbps value, mapping to nearest preset or Custom
+    /// Create from kbps value, mapping exact preset values or preserving Custom
     pub fn from_kbps(kbps: u32) -> Self {
         match kbps {
-            0..=1500 => Self::Speed,
-            1501..=6000 => Self::Balanced,
-            6001..=10000 => Self::Quality,
-            _ => Self::Custom(kbps),
+            1000 => Self::Speed,
+            4000 => Self::Balanced,
+            16000 => Self::Quality,
+            kbps => Self::Custom(kbps),
         }
+    }
+}
+
+impl GopPreset {
+    /// Get the preset interval in seconds. Custom returns the provided interval.
+    pub fn interval_seconds(&self, custom_interval_seconds: f32) -> f32 {
+        match self {
+            Self::LowLatency => 0.5,
+            Self::Balanced => 1.0,
+            Self::Quality => 2.0,
+            Self::Custom => custom_interval_seconds,
+        }
+    }
+
+    /// Get GOP size in frames for the given FPS.
+    pub fn gop_size(&self, fps: u32, custom_interval_seconds: f32) -> u32 {
+        let interval = self
+            .interval_seconds(custom_interval_seconds)
+            .clamp(0.1, 10.0);
+        ((fps.max(1) as f32) * interval).round().max(1.0) as u32
     }
 }
 
@@ -81,8 +103,19 @@ impl std::fmt::Display for BitratePreset {
         match self {
             Self::Speed => write!(f, "Speed (1 Mbps)"),
             Self::Balanced => write!(f, "Balanced (4 Mbps)"),
-            Self::Quality => write!(f, "Quality (8 Mbps)"),
+            Self::Quality => write!(f, "Quality (16 Mbps)"),
             Self::Custom(kbps) => write!(f, "Custom ({} kbps)", kbps),
+        }
+    }
+}
+
+impl std::fmt::Display for GopPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LowLatency => write!(f, "LowLatency (0.5s)"),
+            Self::Balanced => write!(f, "Balanced (1s)"),
+            Self::Quality => write!(f, "Quality (2s)"),
+            Self::Custom => write!(f, "Custom"),
         }
     }
 }

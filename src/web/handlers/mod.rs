@@ -1255,7 +1255,7 @@ pub async fn stream_stop(State(state): State<Arc<AppState>>) -> Result<Json<Logi
 /// Stream mode request
 #[derive(Deserialize)]
 pub struct SetStreamModeRequest {
-    /// Target mode: "mjpeg" or "webrtc"
+    /// Target mode: "h264", "h265", or "webrtc" (alias for h264)
     pub mode: String,
 }
 
@@ -1285,8 +1285,7 @@ pub async fn stream_mode_get(State(state): State<Arc<AppState>>) -> Json<StreamM
             match codec {
                 VideoCodecType::H264 => "h264".to_string(),
                 VideoCodecType::H265 => "h265".to_string(),
-                VideoCodecType::VP8 => "vp8".to_string(),
-                VideoCodecType::VP9 => "vp9".to_string(),
+                VideoCodecType::VP8 | VideoCodecType::VP9 => "h264".to_string(),
             }
         }
     };
@@ -1299,7 +1298,7 @@ pub async fn stream_mode_get(State(state): State<Arc<AppState>>) -> Json<StreamM
     })
 }
 
-/// Set stream mode (switch between MJPEG and WebRTC)
+/// Set stream mode/codec.
 pub async fn stream_mode_set(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SetStreamModeRequest>,
@@ -1310,25 +1309,15 @@ pub async fn stream_mode_set(
 
     let mode_lower = req.mode.to_lowercase();
     let (new_mode, video_codec) = match mode_lower.as_str() {
-        "mjpeg" => (StreamMode::Mjpeg, None),
         "webrtc" | "h264" => (StreamMode::WebRTC, Some(VideoCodecType::H264)),
         "h265" => (StreamMode::WebRTC, Some(VideoCodecType::H265)),
-        "vp8" => (StreamMode::WebRTC, Some(VideoCodecType::VP8)),
-        "vp9" => (StreamMode::WebRTC, Some(VideoCodecType::VP9)),
         _ => {
             return Err(AppError::BadRequest(format!(
-                "Invalid mode '{}'. Valid modes: mjpeg, h264, h265, vp8, vp9",
+                "Invalid mode '{}'. Valid modes: h264, h265",
                 req.mode
             )));
         }
     };
-
-    if new_mode == StreamMode::Mjpeg && !constraints.is_mjpeg_allowed() {
-        return Err(AppError::BadRequest(format!(
-            "Codec 'mjpeg' is not allowed: {}",
-            constraints.reason
-        )));
-    }
 
     if let Some(codec) = video_codec {
         if !constraints.is_webrtc_codec_allowed(codec) {
@@ -1344,8 +1333,7 @@ pub async fn stream_mode_set(
         (StreamMode::Mjpeg, _) => "mjpeg",
         (StreamMode::WebRTC, Some(VideoCodecType::H264)) => "h264",
         (StreamMode::WebRTC, Some(VideoCodecType::H265)) => "h265",
-        (StreamMode::WebRTC, Some(VideoCodecType::VP8)) => "vp8",
-        (StreamMode::WebRTC, Some(VideoCodecType::VP9)) => "vp9",
+        (StreamMode::WebRTC, Some(VideoCodecType::VP8 | VideoCodecType::VP9)) => "h264",
         (StreamMode::WebRTC, None) => "webrtc",
     };
 
@@ -1410,8 +1398,7 @@ pub async fn stream_mode_set(
             match codec {
                 VideoCodecType::H264 => "h264".to_string(),
                 VideoCodecType::H265 => "h265".to_string(),
-                VideoCodecType::VP8 => "vp8".to_string(),
-                VideoCodecType::VP9 => "vp9".to_string(),
+                VideoCodecType::VP8 | VideoCodecType::VP9 => "h264".to_string(),
             }
         }
     };
@@ -1439,7 +1426,7 @@ pub async fn stream_mode_set(
 /// Available video codec info
 #[derive(Serialize)]
 pub struct VideoCodecInfo {
-    /// Codec identifier (mjpeg, h264, h265, vp8, vp9)
+    /// Codec identifier (h264, h265)
     pub id: String,
     /// Display name
     pub name: String,
@@ -1462,7 +1449,7 @@ pub struct EncoderBackendInfo {
     pub name: String,
     /// Whether this is a hardware backend
     pub is_hardware: bool,
-    /// Supported video formats (h264, h265, vp8, vp9)
+    /// Supported video formats (h264, h265)
     pub supported_formats: Vec<String>,
 }
 
@@ -1513,8 +1500,7 @@ pub async fn stream_constraints_get(
             match codec {
                 VideoCodecType::H264 => "h264".to_string(),
                 VideoCodecType::H265 => "h265".to_string(),
-                VideoCodecType::VP8 => "vp8".to_string(),
-                VideoCodecType::VP9 => "vp9".to_string(),
+                VideoCodecType::VP8 | VideoCodecType::VP9 => "h264".to_string(),
             }
         }
     };
@@ -1551,6 +1537,14 @@ pub async fn stream_set_bitrate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SetBitrateRequest>,
 ) -> Result<Json<LoginResponse>> {
+    if let BitratePreset::Custom(kbps) = req.bitrate_preset {
+        if !(250..=100_000).contains(&kbps) {
+            return Err(AppError::BadRequest(
+                "Custom bitrate must be between 250 and 100000 kbps".into(),
+            ));
+        }
+    }
+
     // Update config
     state
         .config
@@ -1590,11 +1584,11 @@ pub async fn stream_codecs_list() -> Json<AvailableCodecsResponse> {
         let formats = registry.formats_for_backend(backend);
         let format_ids: Vec<String> = formats
             .iter()
+            .filter(|f| matches!(f, VideoEncoderType::H264 | VideoEncoderType::H265))
             .map(|f| match f {
                 VideoEncoderType::H264 => "h264",
                 VideoEncoderType::H265 => "h265",
-                VideoEncoderType::VP8 => "vp8",
-                VideoEncoderType::VP9 => "vp9",
+                VideoEncoderType::VP8 | VideoEncoderType::VP9 => unreachable!(),
             })
             .map(String::from)
             .collect();
@@ -1609,16 +1603,6 @@ pub async fn stream_codecs_list() -> Json<AvailableCodecsResponse> {
 
     // Build codecs list (for backward compatibility)
     let mut codecs = Vec::new();
-
-    // MJPEG is always available (HTTP streaming)
-    codecs.push(VideoCodecInfo {
-        id: "mjpeg".to_string(),
-        name: "MJPEG / HTTP".to_string(),
-        protocol: "http".to_string(),
-        hardware: false,
-        backend: Some("software".to_string()),
-        available: true,
-    });
 
     // Check H264 availability (supports software fallback)
     let h264_encoder = registry.best_available_encoder(VideoEncoderType::H264);
@@ -1640,28 +1624,6 @@ pub async fn stream_codecs_list() -> Json<AvailableCodecsResponse> {
         hardware: h265_encoder.map(|e| e.is_hardware).unwrap_or(false),
         backend: h265_encoder.map(|e| e.backend.to_string()),
         available: h265_encoder.is_some(),
-    });
-
-    // Check VP8 availability (now supports software too)
-    let vp8_encoder = registry.best_available_encoder(VideoEncoderType::VP8);
-    codecs.push(VideoCodecInfo {
-        id: "vp8".to_string(),
-        name: "VP8 / WebRTC".to_string(),
-        protocol: "webrtc".to_string(),
-        hardware: vp8_encoder.map(|e| e.is_hardware).unwrap_or(false),
-        backend: vp8_encoder.map(|e| e.backend.to_string()),
-        available: vp8_encoder.is_some(),
-    });
-
-    // Check VP9 availability (now supports software too)
-    let vp9_encoder = registry.best_available_encoder(VideoEncoderType::VP9);
-    codecs.push(VideoCodecInfo {
-        id: "vp9".to_string(),
-        name: "VP9 / WebRTC".to_string(),
-        protocol: "webrtc".to_string(),
-        hardware: vp9_encoder.map(|e| e.is_hardware).unwrap_or(false),
-        backend: vp9_encoder.map(|e| e.backend.to_string()),
-        available: vp9_encoder.is_some(),
     });
 
     Json(AvailableCodecsResponse {

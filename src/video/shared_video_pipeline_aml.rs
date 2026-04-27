@@ -26,6 +26,8 @@ pub struct SharedVideoPipelineConfig {
     pub input_format: PixelFormat,
     pub output_codec: VideoEncoderType,
     pub bitrate_preset: crate::video::encoder::BitratePreset,
+    pub gop_preset: crate::video::encoder::GopPreset,
+    pub gop_interval_seconds: f32,
     pub fps: u32,
     pub encoder_backend: Option<crate::video::encoder::registry::EncoderBackend>,
     pub hdr_mode: crate::config::HdrMode,
@@ -38,6 +40,8 @@ impl Default for SharedVideoPipelineConfig {
             input_format: PixelFormat::Nv12,
             output_codec: VideoEncoderType::H264,
             bitrate_preset: crate::video::encoder::BitratePreset::Balanced,
+            gop_preset: crate::video::encoder::GopPreset::Balanced,
+            gop_interval_seconds: 1.0,
             fps: 30,
             encoder_backend: None,
             hdr_mode: crate::config::HdrMode::default(),
@@ -150,6 +154,9 @@ impl SharedVideoPipeline {
             hdr_mode: config.hdr_mode,
             output_codec,
             bitrate_kbps: config.bitrate_preset.bitrate_kbps(),
+            gop: config
+                .gop_preset
+                .gop_size(config.fps, config.gop_interval_seconds) as i32,
             device: device_path.to_string_lossy().to_string(),
             ..AmlPipelineConfig::default()
         }));

@@ -24,7 +24,7 @@ pub mod vp9;
 pub mod aml_venc;
 
 pub use traits::{
-    BitratePreset, EncodedFormat, EncodedFrame, Encoder, EncoderConfig, EncoderFactory,
+    BitratePreset, EncodedFormat, EncodedFrame, Encoder, EncoderConfig, EncoderFactory, GopPreset,
 };
 
 #[cfg(feature = "hwencode")]

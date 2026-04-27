@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import {
   Popover,
@@ -25,6 +26,8 @@ import {
   type VideoCodecInfo,
   type EncoderBackendInfo,
   type BitratePreset,
+  type GopPreset,
+  type StreamConfigUpdate,
   type StreamConstraintsResponse,
 } from '@/api'
 import { getVideoFormatState, isVideoFormatSelectable } from '@/lib/video-format-support'
@@ -33,6 +36,15 @@ import { useConfigStore } from '@/stores/config'
 import { useRouter } from 'vue-router'
 
 export type VideoMode = 'mjpeg' | 'h264' | 'h265' | 'vp8' | 'vp9'
+type BitratePresetType = 'Speed' | 'Balanced' | 'Quality' | 'Custom'
+type GopPresetType = 'LowLatency' | 'Balanced' | 'Quality' | 'Custom'
+
+const SUPPORTED_VIDEO_MODES = new Set(['h264', 'h265'])
+const DEFAULT_CUSTOM_BITRATE_MBPS = 20
+const MIN_CUSTOM_BITRATE_MBPS = 0.25
+const MAX_CUSTOM_BITRATE_MBPS = 100
+const MIN_GOP_INTERVAL_SECONDS = 0.1
+const MAX_GOP_INTERVAL_SECONDS = 10
 
 interface VideoDevice {
   path: string
@@ -114,7 +126,6 @@ const isCodecLocked = computed(() => !!codecLockMessage.value)
 
 const isCodecOptionDisabled = (codecId: string): boolean => {
   if (!isBrowserSupported(codecId)) return true
-  if (isRustdeskWebrtcLocked.value && codecId === 'mjpeg') return true
   return false
 }
 
@@ -124,9 +135,6 @@ const browserSupportedCodecs = ref<Set<string>>(new Set())
 // Check browser WebRTC codec support
 function detectBrowserCodecSupport() {
   const supported = new Set<string>()
-
-  // MJPEG is always supported (HTTP streaming, no WebRTC)
-  supported.add('mjpeg')
 
   // Check WebRTC receive capabilities
   if (typeof RTCRtpReceiver !== 'undefined' && RTCRtpReceiver.getCapabilities) {
@@ -141,22 +149,11 @@ function detectBrowserCodecSupport() {
         if (mimeType.includes('h265') || mimeType.includes('hevc')) {
           supported.add('h265')
         }
-        if (mimeType.includes('vp8')) {
-          supported.add('vp8')
-        }
-        if (mimeType.includes('vp9')) {
-          supported.add('vp9')
-        }
-        if (mimeType.includes('av1')) {
-          supported.add('av1')
-        }
       }
     }
   } else {
     // Fallback: assume basic codecs are supported
     supported.add('h264')
-    supported.add('vp8')
-    supported.add('vp9')
   }
 
   browserSupportedCodecs.value = supported
@@ -165,7 +162,6 @@ function detectBrowserCodecSupport() {
 
 // Check if a codec is supported by browser
 const isBrowserSupported = (codecId: string): boolean => {
-  if (codecId === 'mjpeg') return true
   return browserSupportedCodecs.value.has(codecId)
 }
 
@@ -245,12 +241,14 @@ const selectedDevice = ref<string>('')
 const selectedFormat = ref<string>('')
 const selectedResolution = ref<string>('')
 const selectedFps = ref<number>(30)
-const selectedBitratePreset = ref<'Speed' | 'Balanced' | 'Quality'>('Balanced')
+const selectedBitratePreset = ref<BitratePresetType>('Balanced')
+const selectedCustomBitrateMbps = ref<number>(DEFAULT_CUSTOM_BITRATE_MBPS)
+const selectedGopPreset = ref<GopPresetType>('Balanced')
+const selectedGopIntervalSeconds = ref<number>(1)
 const isDirty = ref(false)
 
 // UI state
 const applying = ref(false)
-const applyingBitrate = ref(false)
 
 // Current config from store
 const currentConfig = computed(() => ({
@@ -259,14 +257,58 @@ const currentConfig = computed(() => ({
   width: configStore.video?.width || 1920,
   height: configStore.video?.height || 1080,
   fps: configStore.video?.fps || 30,
+  bitratePreset: normalizeBitratePreset(configStore.stream?.bitrate_preset),
+  customBitrateMbps: customBitrateMbpsFromPreset(configStore.stream?.bitrate_preset),
+  gopPreset: normalizeGopPreset(configStore.stream?.gop_preset),
+  gopIntervalSeconds: normalizeGopIntervalSeconds(
+    configStore.stream?.gop_interval_seconds,
+    normalizeGopPreset(configStore.stream?.gop_preset),
+  ),
 }))
+
+function clampNumber(value: number, min: number, max: number, fallback: number) {
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(Math.max(value, min), max)
+}
+
+function normalizeBitratePreset(preset: BitratePreset | undefined): BitratePresetType {
+  if (preset?.type === 'Speed' || preset?.type === 'Balanced' || preset?.type === 'Quality' || preset?.type === 'Custom') {
+    return preset.type
+  }
+  return 'Balanced'
+}
+
+function customBitrateMbpsFromPreset(preset: BitratePreset | undefined): number {
+  if (preset?.type === 'Custom') {
+    return clampNumber(preset.value / 1000, MIN_CUSTOM_BITRATE_MBPS, MAX_CUSTOM_BITRATE_MBPS, DEFAULT_CUSTOM_BITRATE_MBPS)
+  }
+  return DEFAULT_CUSTOM_BITRATE_MBPS
+}
+
+function normalizeGopPreset(preset: GopPreset | undefined): GopPresetType {
+  if (preset === 'LowLatency' || preset === 'Balanced' || preset === 'Quality' || preset === 'Custom') {
+    return preset
+  }
+  return 'Balanced'
+}
+
+function gopPresetDefaultInterval(preset: GopPresetType): number {
+  if (preset === 'LowLatency') return 0.5
+  if (preset === 'Quality') return 2
+  return 1
+}
+
+function normalizeGopIntervalSeconds(interval: number | undefined, preset: GopPresetType): number {
+  const fallback = gopPresetDefaultInterval(preset)
+  return clampNumber(interval ?? fallback, MIN_GOP_INTERVAL_SECONDS, MAX_GOP_INTERVAL_SECONDS, fallback)
+}
 
 // Button display text - simplified to just show label
 const buttonText = computed(() => t('actionbar.videoConfig'))
 
 // Available codecs for selection (filtered by backend support and enriched with backend info)
 const availableCodecs = computed(() => {
-  const allAvailable = codecs.value.filter(c => c.available)
+  const allAvailable = codecs.value.filter(c => c.available && SUPPORTED_VIDEO_MODES.has(c.id))
 
   // Auto mode: show all available with their best (hardware-preferred) backend
   if (currentEncoderBackend.value === 'auto') {
@@ -279,15 +321,10 @@ const availableCodecs = computed(() => {
 
   const backendFiltered = allAvailable
     .filter(codec => {
-      // MJPEG is always available (doesn't require encoder)
-      if (codec.id === 'mjpeg') return true
       // Check if codec format is supported by the configured backend
       return backend.supported_formats.includes(codec.id)
     })
     .map(codec => {
-      // For MJPEG, keep original info
-      if (codec.id === 'mjpeg') return codec
-
       // Override backend info for WebRTC codecs based on selected backend
       return {
         ...codec,
@@ -367,8 +404,8 @@ async function loadCodecs() {
     console.info('[VideoConfig] Failed to load codecs')
     // Fallback to default codecs
     codecs.value = [
-      { id: 'mjpeg', name: 'MJPEG / HTTP', protocol: 'http', hardware: false, backend: 'software', available: true },
       { id: 'h264', name: 'H.264 / WebRTC', protocol: 'webrtc', hardware: false, backend: 'software', available: true },
+      { id: 'h265', name: 'H.265 / WebRTC', protocol: 'webrtc', hardware: false, backend: 'software', available: true },
     ]
   } finally {
     loadingCodecs.value = false
@@ -395,6 +432,10 @@ function initializeFromCurrent() {
   selectedFormat.value = config.format
   selectedResolution.value = `${config.width}x${config.height}`
   selectedFps.value = config.fps
+  selectedBitratePreset.value = config.bitratePreset
+  selectedCustomBitrateMbps.value = config.customBitrateMbps
+  selectedGopPreset.value = config.gopPreset
+  selectedGopIntervalSeconds.value = config.gopIntervalSeconds
   isDirty.value = false
 }
 
@@ -405,7 +446,11 @@ function syncFromCurrentIfChanged() {
   if (selectedDevice.value === config.device
       && selectedFormat.value === config.format
       && selectedResolution.value === nextResolution
-      && selectedFps.value === config.fps) {
+      && selectedFps.value === config.fps
+      && selectedBitratePreset.value === config.bitratePreset
+      && selectedCustomBitrateMbps.value === config.customBitrateMbps
+      && selectedGopPreset.value === config.gopPreset
+      && Math.abs(selectedGopIntervalSeconds.value - config.gopIntervalSeconds) < 0.001) {
     return
   }
 
@@ -413,12 +458,17 @@ function syncFromCurrentIfChanged() {
   selectedFormat.value = config.format
   selectedResolution.value = nextResolution
   selectedFps.value = config.fps
+  selectedBitratePreset.value = config.bitratePreset
+  selectedCustomBitrateMbps.value = config.customBitrateMbps
+  selectedGopPreset.value = config.gopPreset
+  selectedGopIntervalSeconds.value = config.gopIntervalSeconds
   isDirty.value = false
 }
 
 // Handle video mode change
 function handleVideoModeChange(mode: unknown) {
   if (typeof mode !== 'string') return
+  if (!SUPPORTED_VIDEO_MODES.has(mode)) return
 
   if (isRtspCodecLocked.value) {
     toast.warning(codecLockMessage.value)
@@ -517,41 +567,114 @@ function handleFpsChange(fps: unknown) {
   isDirty.value = true
 }
 
-// Apply bitrate preset change
-async function applyBitratePreset(preset: 'Speed' | 'Balanced' | 'Quality') {
-  if (applyingBitrate.value) return
-  applyingBitrate.value = true
-  try {
-    const bitratePreset: BitratePreset = { type: preset }
-    await streamApi.setBitratePreset(bitratePreset)
-  } catch (e) {
-    console.info('[VideoConfig] Failed to apply bitrate preset:', e)
-  } finally {
-    applyingBitrate.value = false
-  }
+// Handle bitrate preset selection
+function handleBitratePresetChange(preset: BitratePresetType) {
+  selectedBitratePreset.value = preset
+  isDirty.value = true
 }
 
-// Handle bitrate preset selection
-function handleBitratePresetChange(preset: 'Speed' | 'Balanced' | 'Quality') {
-  selectedBitratePreset.value = preset
-  if (props.videoMode !== 'mjpeg') {
-    applyBitratePreset(preset)
+function handleCustomBitrateChange(value: string | number) {
+  selectedCustomBitrateMbps.value = clampNumber(
+    Number(value),
+    MIN_CUSTOM_BITRATE_MBPS,
+    MAX_CUSTOM_BITRATE_MBPS,
+    DEFAULT_CUSTOM_BITRATE_MBPS,
+  )
+  isDirty.value = true
+}
+
+function handleGopPresetChange(preset: unknown) {
+  if (preset !== 'LowLatency' && preset !== 'Balanced' && preset !== 'Quality' && preset !== 'Custom') return
+  selectedGopPreset.value = preset
+  if (preset !== 'Custom') {
+    selectedGopIntervalSeconds.value = gopPresetDefaultInterval(preset)
+  }
+  isDirty.value = true
+}
+
+function handleGopIntervalChange(value: string | number) {
+  selectedGopIntervalSeconds.value = clampNumber(
+    Number(value),
+    MIN_GOP_INTERVAL_SECONDS,
+    MAX_GOP_INTERVAL_SECONDS,
+    gopPresetDefaultInterval(selectedGopPreset.value),
+  )
+  selectedGopPreset.value = 'Custom'
+  isDirty.value = true
+}
+
+function selectedBitrateConfig(): BitratePreset {
+  if (selectedBitratePreset.value === 'Custom') {
+    return {
+      type: 'Custom',
+      value: Math.round(selectedCustomBitrateMbps.value * 1000),
+    }
+  }
+  return { type: selectedBitratePreset.value }
+}
+
+function sameBitratePreset(a: BitratePreset | undefined, b: BitratePreset) {
+  if (!a || a.type !== b.type) return false
+  if (b.type === 'Custom') return a.type === 'Custom' && a.value === b.value
+  return true
+}
+
+function selectedGopIntervalConfig() {
+  return selectedGopPreset.value === 'Custom'
+    ? selectedGopIntervalSeconds.value
+    : gopPresetDefaultInterval(selectedGopPreset.value)
+}
+
+function streamConfigChanged() {
+  const stream = configStore.stream
+  const nextBitrate = selectedBitrateConfig()
+  const nextGopInterval = selectedGopIntervalConfig()
+  return !sameBitratePreset(stream?.bitrate_preset, nextBitrate)
+    || normalizeGopPreset(stream?.gop_preset) !== selectedGopPreset.value
+    || Math.abs(normalizeGopIntervalSeconds(stream?.gop_interval_seconds, selectedGopPreset.value) - nextGopInterval) > 0.001
+}
+
+function videoConfigChanged() {
+  const config = currentConfig.value
+  return selectedDevice.value !== config.device
+    || selectedFormat.value !== config.format
+    || selectedResolution.value !== `${config.width}x${config.height}`
+    || selectedFps.value !== config.fps
+}
+
+const hasPendingChanges = computed(() => videoConfigChanged() || streamConfigChanged())
+
+function buildStreamConfigUpdate(): StreamConfigUpdate {
+  return {
+    bitrate_preset: selectedBitrateConfig(),
+    gop_preset: selectedGopPreset.value as GopPreset,
+    gop_interval_seconds: selectedGopIntervalConfig(),
   }
 }
 
 // Apply video configuration
 async function applyVideoConfig() {
   const [width, height] = selectedResolution.value.split('x').map(Number)
+  const shouldUpdateVideo = videoConfigChanged()
+  const shouldUpdateStream = streamConfigChanged()
+
+  if (!shouldUpdateVideo && !shouldUpdateStream) return
 
   applying.value = true
   try {
-    await configStore.updateVideo({
-      device: selectedDevice.value,
-      format: selectedFormat.value,
-      width,
-      height,
-      fps: toConfigFps(selectedFps.value),
-    })
+    if (shouldUpdateStream) {
+      await configStore.updateStream(buildStreamConfigUpdate())
+    }
+
+    if (shouldUpdateVideo) {
+      await configStore.updateVideo({
+        device: selectedDevice.value,
+        format: selectedFormat.value,
+        width,
+        height,
+        fps: toConfigFps(selectedFps.value),
+      })
+    }
 
     toast.success(t('config.applied'))
     isDirty.value = false
@@ -637,7 +760,7 @@ watch(
         <span class="hidden sm:inline">{{ buttonText }}</span>
       </Button>
     </PopoverTrigger>
-    <PopoverContent class="w-[min(320px,92vw)] p-3" align="start">
+    <PopoverContent class="w-[min(360px,92vw)] p-3" align="start">
       <div class="space-y-3">
         <h4 class="text-sm font-medium">{{ t('actionbar.videoConfig') }}</h4>
 
@@ -714,7 +837,7 @@ watch(
               <Label class="text-xs">{{ t('actionbar.bitratePreset') }}</Label>
               <HelpTooltip :content="t('help.videoBitratePreset')" icon-size="sm" />
             </div>
-            <div class="grid grid-cols-3 gap-1.5">
+            <div class="grid grid-cols-2 gap-1.5">
               <Button
                 variant="outline"
                 size="sm"
@@ -722,7 +845,7 @@ watch(
                   'h-auto py-1.5 px-2 flex flex-col items-center gap-0.5',
                   selectedBitratePreset === 'Speed' && 'border-primary bg-primary/10'
                 ]"
-                :disabled="applyingBitrate"
+                :disabled="applying"
                 @click="handleBitratePresetChange('Speed')"
               >
                 <Zap class="h-3.5 w-3.5" />
@@ -735,7 +858,7 @@ watch(
                   'h-auto py-1.5 px-2 flex flex-col items-center gap-0.5',
                   selectedBitratePreset === 'Balanced' && 'border-primary bg-primary/10'
                 ]"
-                :disabled="applyingBitrate"
+                :disabled="applying"
                 @click="handleBitratePresetChange('Balanced')"
               >
                 <Scale class="h-3.5 w-3.5" />
@@ -748,12 +871,82 @@ watch(
                   'h-auto py-1.5 px-2 flex flex-col items-center gap-0.5',
                   selectedBitratePreset === 'Quality' && 'border-primary bg-primary/10'
                 ]"
-                :disabled="applyingBitrate"
+                :disabled="applying"
                 @click="handleBitratePresetChange('Quality')"
               >
                 <Image class="h-3.5 w-3.5" />
                 <span class="text-[10px] font-medium">{{ t('actionbar.bitrateQuality') }}</span>
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                :class="[
+                  'h-auto py-1.5 px-2 flex flex-col items-center gap-0.5',
+                  selectedBitratePreset === 'Custom' && 'border-primary bg-primary/10'
+                ]"
+                :disabled="applying"
+                @click="handleBitratePresetChange('Custom')"
+              >
+                <Settings class="h-3.5 w-3.5" />
+                <span class="text-[10px] font-medium">{{ t('actionbar.bitrateCustom') }}</span>
+              </Button>
+            </div>
+            <div v-if="selectedBitratePreset === 'Custom'" class="flex items-center gap-2">
+              <Input
+                type="number"
+                min="0.25"
+                max="100"
+                step="0.25"
+                class="h-8 text-xs"
+                :model-value="selectedCustomBitrateMbps"
+                :disabled="applying"
+                @update:model-value="handleCustomBitrateChange"
+              />
+              <span class="text-xs text-muted-foreground">Mbps</span>
+            </div>
+          </div>
+
+          <!-- GOP Settings - Only shown for WebRTC modes -->
+          <div v-if="props.videoMode !== 'mjpeg'" class="space-y-2">
+            <div class="flex items-center gap-1">
+              <Label class="text-xs">{{ t('actionbar.gopPreset') }}</Label>
+              <HelpTooltip :content="t('help.videoGopPreset')" icon-size="sm" />
+            </div>
+            <Select
+              :model-value="selectedGopPreset"
+              :disabled="applying"
+              @update:model-value="handleGopPresetChange"
+            >
+              <SelectTrigger class="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="LowLatency" class="text-xs">
+                  {{ t('actionbar.gopLowLatency') }}
+                </SelectItem>
+                <SelectItem value="Balanced" class="text-xs">
+                  {{ t('actionbar.gopBalanced') }}
+                </SelectItem>
+                <SelectItem value="Quality" class="text-xs">
+                  {{ t('actionbar.gopQuality') }}
+                </SelectItem>
+                <SelectItem value="Custom" class="text-xs">
+                  {{ t('actionbar.gopCustom') }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <div v-if="selectedGopPreset === 'Custom'" class="flex items-center gap-2">
+              <Input
+                type="number"
+                min="0.1"
+                max="10"
+                step="0.1"
+                class="h-8 text-xs"
+                :model-value="selectedGopIntervalSeconds"
+                :disabled="applying"
+                @update:model-value="handleGopIntervalChange"
+              />
+              <span class="text-xs text-muted-foreground">{{ t('actionbar.gopSeconds') }}</span>
             </div>
           </div>
 
@@ -936,7 +1129,7 @@ watch(
           <!-- Apply Button -->
           <Button
             class="w-full h-8 text-xs"
-            :disabled="applying || !selectedDevice || !selectedFormat"
+            :disabled="applying || !selectedDevice || !selectedFormat || !hasPendingChanges"
             @click="applyVideoConfig"
           >
             <Loader2 v-if="applying" class="h-3.5 w-3.5 mr-1.5 animate-spin" />

@@ -103,12 +103,19 @@ pub async fn apply_stream_config(
             .await?;
     }
 
-    // 更新码率
-    if old_config.bitrate_preset != new_config.bitrate_preset {
+    // 更新编码码率/GOP
+    if old_config.bitrate_preset != new_config.bitrate_preset
+        || old_config.gop_preset != new_config.gop_preset
+        || (old_config.gop_interval_seconds - new_config.gop_interval_seconds).abs() > f32::EPSILON
+    {
         state
             .stream_manager
             .webrtc_streamer()
-            .set_bitrate_preset(new_config.bitrate_preset)
+            .set_encoding_config(
+                new_config.bitrate_preset,
+                new_config.gop_preset,
+                new_config.gop_interval_seconds,
+            )
             .await
             .ok(); // Ignore error if no active stream
     }
@@ -138,9 +145,11 @@ pub async fn apply_stream_config(
     }
 
     tracing::info!(
-        "Stream config applied: encoder={:?}, bitrate={}",
+        "Stream config applied: encoder={:?}, bitrate={}, gop={} interval={}s",
         new_config.encoder,
-        new_config.bitrate_preset
+        new_config.bitrate_preset,
+        new_config.gop_preset,
+        new_config.gop_interval_seconds
     );
     Ok(())
 }

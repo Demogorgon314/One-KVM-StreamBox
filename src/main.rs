@@ -322,6 +322,8 @@ async fn main() -> anyhow::Result<()> {
                 input_format: video_format,
                 fps: config.video.fps,
                 bitrate_preset: config.stream.bitrate_preset,
+                gop_preset: config.stream.gop_preset,
+                gop_interval_seconds: config.stream.gop_interval_seconds,
                 encoder_backend: config.stream.encoder.to_backend(),
                 hdr_mode: config.video.hdr_mode,
                 webrtc: {

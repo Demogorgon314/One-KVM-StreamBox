@@ -717,6 +717,7 @@ export type {
   StreamMode,
   EncoderType,
   BitratePreset,
+  GopPreset,
 } from '@/types/generated'
 
 // Audio API

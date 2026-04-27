@@ -15,6 +15,8 @@ pub struct StreamCodecConstraints {
     pub reason: String,
 }
 
+const SUPPORTED_WEBRTC_CODECS: [VideoCodecType; 2] = [VideoCodecType::H264, VideoCodecType::H265];
+
 #[derive(Debug, Clone)]
 pub struct ConstraintEnforcementResult {
     pub changed: bool,
@@ -26,13 +28,8 @@ impl StreamCodecConstraints {
         Self {
             rustdesk_enabled: false,
             rtsp_enabled: false,
-            allowed_webrtc_codecs: vec![
-                VideoCodecType::H264,
-                VideoCodecType::H265,
-                VideoCodecType::VP8,
-                VideoCodecType::VP9,
-            ],
-            allow_mjpeg: true,
+            allowed_webrtc_codecs: SUPPORTED_WEBRTC_CODECS.to_vec(),
+            allow_mjpeg: false,
             locked_codec: None,
             reason: "No codec lock active".to_string(),
         }
@@ -68,15 +65,10 @@ impl StreamCodecConstraints {
             return Self {
                 rustdesk_enabled,
                 rtsp_enabled,
-                allowed_webrtc_codecs: vec![
-                    VideoCodecType::H264,
-                    VideoCodecType::H265,
-                    VideoCodecType::VP8,
-                    VideoCodecType::VP9,
-                ],
+                allowed_webrtc_codecs: SUPPORTED_WEBRTC_CODECS.to_vec(),
                 allow_mjpeg: false,
                 locked_codec: None,
-                reason: "RustDesk enabled, MJPEG disabled".to_string(),
+                reason: "RustDesk enabled".to_string(),
             };
         }
 
@@ -102,14 +94,12 @@ impl StreamCodecConstraints {
     }
 
     pub fn allowed_codecs_for_api(&self) -> Vec<&'static str> {
-        let mut codecs = Vec::new();
-        if self.allow_mjpeg {
-            codecs.push("mjpeg");
-        }
-        for codec in &self.allowed_webrtc_codecs {
-            codecs.push(codec_to_id(*codec));
-        }
-        codecs
+        self.allowed_webrtc_codecs
+            .iter()
+            .copied()
+            .filter(|codec| SUPPORTED_WEBRTC_CODECS.contains(codec))
+            .map(codec_to_id)
+            .collect()
     }
 }
 

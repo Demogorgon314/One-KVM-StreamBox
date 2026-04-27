@@ -258,7 +258,7 @@ export enum EncoderType {
  */
 export type BitratePreset = 
 	/**
-	 * Speed priority: 1 Mbps, lowest latency, smaller GOP
+	 * Speed priority: 1 Mbps, lowest bandwidth
 	 * Best for: slow networks, remote management, low-bandwidth scenarios
 	 */
 	| { type: "Speed", value?: undefined }
@@ -268,12 +268,15 @@ export type BitratePreset =
 	 */
 	| { type: "Balanced", value?: undefined }
 	/**
-	 * Quality priority: 8 Mbps, best visual quality
+	 * Quality priority: 16 Mbps, best visual quality
 	 * Best for: local network, high-bandwidth scenarios, detailed work
 	 */
 	| { type: "Quality", value?: undefined }
 	/** Custom bitrate in kbps (for advanced users) */
 	| { type: "Custom", value: number };
+
+/** GOP interval preset for video encoding */
+export type GopPreset = "LowLatency" | "Balanced" | "Quality" | "Custom";
 
 /** Streaming configuration */
 export interface StreamConfig {
@@ -281,8 +284,12 @@ export interface StreamConfig {
 	mode: StreamMode;
 	/** Encoder type for H264/H265 */
 	encoder: EncoderType;
-	/** Bitrate preset (Speed/Balanced/Quality) */
+	/** Bitrate preset (Speed/Balanced/Quality/Custom) */
 	bitrate_preset: BitratePreset;
+	/** GOP preset (LowLatency/Balanced/Quality/Custom) */
+	gop_preset: GopPreset;
+	/** GOP interval in seconds when using a custom GOP preset */
+	gop_interval_seconds: number;
 	/**
 	 * Custom STUN server (e.g., "stun:stun.l.google.com:19302")
 	 * If empty, uses public ICE servers from secrets.toml
@@ -653,6 +660,8 @@ export interface StreamConfigResponse {
 	mode: StreamMode;
 	encoder: EncoderType;
 	bitrate_preset: BitratePreset;
+	gop_preset: GopPreset;
+	gop_interval_seconds: number;
 	/** Whether public ICE servers are available (compile-time decision) */
 	has_public_ice_servers: boolean;
 	/** Whether public ICE servers are currently in use (when STUN/TURN are unset) */
@@ -668,6 +677,8 @@ export interface StreamConfigUpdate {
 	mode?: StreamMode;
 	encoder?: EncoderType;
 	bitrate_preset?: BitratePreset;
+	gop_preset?: GopPreset;
+	gop_interval_seconds?: number;
 	/**
 	 * STUN server URL (e.g., "stun:stun.l.google.com:19302")
 	 * Leave empty to use public ICE servers
@@ -855,4 +866,3 @@ export enum CanonicalKey {
 	AltRight = "AltRight",
 	MetaRight = "MetaRight",
 }
-

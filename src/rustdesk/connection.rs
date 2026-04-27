@@ -629,7 +629,7 @@ impl Connection {
         *self.state.write() = ConnectionState::Active;
 
         // Select the best available video codec
-        // Priority: H264 > H265 > VP8 > VP9 (H264/H265 leverage hardware encoding)
+        // Priority: H264 > H265 (the supported stream codecs)
         let negotiated = self.negotiate_video_codec().await;
         self.negotiated_codec = Some(negotiated);
         info!("Negotiated video codec: {:?}", negotiated);
@@ -643,7 +643,7 @@ impl Connection {
     }
 
     /// Negotiate video codec - select the best available encoder
-    /// Priority: H264 > H265 > VP8 > VP9 (H264/H265 leverage hardware encoding on embedded devices)
+    /// Priority: H264 > H265 (supported stream codecs)
     async fn negotiate_video_codec(&self) -> VideoEncoderType {
         let registry = EncoderRegistry::global();
         let constraints = self.current_codec_constraints().await;
@@ -661,17 +661,6 @@ impl Connection {
         {
             return VideoEncoderType::H265;
         }
-        if constraints.is_webrtc_codec_allowed(crate::video::encoder::VideoCodecType::VP8)
-            && registry.is_codec_available(VideoEncoderType::VP8)
-        {
-            return VideoEncoderType::VP8;
-        }
-        if constraints.is_webrtc_codec_allowed(crate::video::encoder::VideoCodecType::VP9)
-            && registry.is_codec_available(VideoEncoderType::VP9)
-        {
-            return VideoEncoderType::VP9;
-        }
-
         // Fallback to preferred allowed codec
         let preferred = constraints.preferred_webrtc_codec();
         warn!(
@@ -737,7 +726,7 @@ impl Connection {
             let preset = match image_quality {
                 2 => Some(BitratePreset::Speed),    // Low -> Speed (1 Mbps)
                 3 => Some(BitratePreset::Balanced), // Balanced -> Balanced (4 Mbps)
-                4 => Some(BitratePreset::Quality),  // Best -> Quality (8 Mbps)
+                4 => Some(BitratePreset::Quality),  // Best -> Quality (16 Mbps)
                 _ => None,
             };
 
@@ -761,12 +750,11 @@ impl Connection {
 
             // Map RustDesk PreferCodec enum to our VideoEncoderType
             // From proto: Auto=0, VP9=1, H264=2, H265=3, VP8=4, AV1=5
+            // Only H264/H265 are supported by this build.
             let requested_codec = match prefer {
-                1 => Some(VideoEncoderType::VP9),
                 2 => Some(VideoEncoderType::H264),
                 3 => Some(VideoEncoderType::H265),
-                4 => Some(VideoEncoderType::VP8),
-                // Auto(0) or AV1(5) or unknown: use current or negotiate
+                // Auto(0), VP9(1), VP8(4), AV1(5), or unknown: use current or negotiate
                 _ => None,
             };
 
@@ -1125,16 +1113,9 @@ impl Connection {
             let h265_available = constraints
                 .is_webrtc_codec_allowed(crate::video::encoder::VideoCodecType::H265)
                 && registry.is_codec_available(VideoEncoderType::H265);
-            let vp8_available = constraints
-                .is_webrtc_codec_allowed(crate::video::encoder::VideoCodecType::VP8)
-                && registry.is_codec_available(VideoEncoderType::VP8);
-            let vp9_available = constraints
-                .is_webrtc_codec_allowed(crate::video::encoder::VideoCodecType::VP9)
-                && registry.is_codec_available(VideoEncoderType::VP9);
-
             info!(
-                "Server encoding capabilities: H264={}, H265={}, VP8={}, VP9={}",
-                h264_available, h265_available, vp8_available, vp9_available
+                "Server encoding capabilities: H264={}, H265={}",
+                h264_available, h265_available
             );
 
             let mut display_width = self.screen_width;
@@ -1160,7 +1141,7 @@ impl Connection {
             let mut encoding = SupportedEncoding::new();
             encoding.h264 = h264_available;
             encoding.h265 = h265_available;
-            encoding.vp8 = vp8_available;
+            encoding.vp8 = false;
             encoding.av1 = false; // AV1 not supported yet
 
             let mut peer_info = PeerInfo::new();
