@@ -10,9 +10,7 @@ use crate::state::AppState;
 use super::types::{WebConfigResponse, WebConfigUpdate};
 
 /// 获取 Web 配置
-pub async fn get_web_config(
-    State(state): State<Arc<AppState>>,
-) -> Json<WebConfigResponse> {
+pub async fn get_web_config(State(state): State<Arc<AppState>>) -> Json<WebConfigResponse> {
     Json(WebConfigResponse::from_stored(&state.config.get().web))
 }
 
@@ -27,9 +25,13 @@ pub async fn update_web_config(
     // Some(Some((cert, key))) = write new cert
     // Some(None)              = clear custom cert
     // None                    = no cert change
-    let cert_path_update: Option<Option<(String, String)>> =
-        if let (Some(cert_pem), Some(key_pem)) = (&req.ssl_cert_pem, &req.ssl_key_pem) {
-            RustlsConfig::from_pem(cert_pem.as_bytes().to_vec(), key_pem.as_bytes().to_vec())
+    let cert_path_update: Option<Option<(String, String)>> = if let (
+        Some(cert_pem),
+        Some(key_pem),
+    ) =
+        (&req.ssl_cert_pem, &req.ssl_key_pem)
+    {
+        RustlsConfig::from_pem(cert_pem.as_bytes().to_vec(), key_pem.as_bytes().to_vec())
                 .await
                 .map_err(|e| {
                     AppError::BadRequest(
@@ -39,30 +41,30 @@ pub async fn update_web_config(
                         .into(),
                     )
                 })?;
-            let cert_dir = state.data_dir().join("certs");
-            tokio::fs::create_dir_all(&cert_dir)
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to create cert dir: {e}")))?;
-            let cert_path = cert_dir.join("custom.crt");
-            let key_path = cert_dir.join("custom.key");
-            tokio::fs::write(&cert_path, cert_pem.as_bytes())
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to write certificate: {e}")))?;
-            tokio::fs::write(&key_path, key_pem.as_bytes())
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to write private key: {e}")))?;
-            Some(Some((
-                cert_path.to_string_lossy().into_owned(),
-                key_path.to_string_lossy().into_owned(),
-            )))
-        } else if req.clear_custom_cert.unwrap_or(false) {
-            let cert_dir = state.data_dir().join("certs");
-            let _ = tokio::fs::remove_file(cert_dir.join("custom.crt")).await;
-            let _ = tokio::fs::remove_file(cert_dir.join("custom.key")).await;
-            Some(None)
-        } else {
-            None
-        };
+        let cert_dir = state.data_dir().join("certs");
+        tokio::fs::create_dir_all(&cert_dir)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to create cert dir: {e}")))?;
+        let cert_path = cert_dir.join("custom.crt");
+        let key_path = cert_dir.join("custom.key");
+        tokio::fs::write(&cert_path, cert_pem.as_bytes())
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to write certificate: {e}")))?;
+        tokio::fs::write(&key_path, key_pem.as_bytes())
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to write private key: {e}")))?;
+        Some(Some((
+            cert_path.to_string_lossy().into_owned(),
+            key_path.to_string_lossy().into_owned(),
+        )))
+    } else if req.clear_custom_cert.unwrap_or(false) {
+        let cert_dir = state.data_dir().join("certs");
+        let _ = tokio::fs::remove_file(cert_dir.join("custom.crt")).await;
+        let _ = tokio::fs::remove_file(cert_dir.join("custom.key")).await;
+        Some(None)
+    } else {
+        None
+    };
 
     state
         .config
@@ -82,7 +84,9 @@ pub async fn update_web_config(
         })
         .await?;
 
-    Ok(Json(WebConfigResponse::from_stored(&state.config.get().web)))
+    Ok(Json(WebConfigResponse::from_stored(
+        &state.config.get().web,
+    )))
 }
 
 #[cfg(test)]

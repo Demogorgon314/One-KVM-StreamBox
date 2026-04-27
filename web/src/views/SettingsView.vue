@@ -155,6 +155,7 @@ const navGroups = computed(() => [
 function selectSection(id: string) {
   activeSection.value = id
   mobileMenuOpen.value = false
+  void loadDevicesForSection(id)
 }
 
 function normalizeSettingsSection(value: unknown): string | null {
@@ -740,7 +741,7 @@ const validateHex = (event: Event, _field: string) => {
 
 watch(() => config.value.msd_enabled, (enabled) => {
   if (!enabled && activeSection.value === 'msd') {
-    activeSection.value = 'hid'
+    selectSection('hid')
   }
 })
 
@@ -1135,6 +1136,26 @@ async function loadDevices() {
     devices.value = await configApi.listDevices()
   } catch (e) {
     console.error('Failed to load devices:', e)
+  }
+}
+
+async function loadDevicesForSection(section = activeSection.value) {
+  if (section === 'video') {
+    await loadDevices()
+    return
+  }
+
+  if (section === 'hid' || section === 'atx') {
+    try {
+      const partial = await configApi.listDevices(['serial', 'udc'])
+      devices.value = {
+        ...devices.value,
+        serial: partial.serial,
+        udc: partial.udc,
+      }
+    } catch (e) {
+      console.error('Failed to load device subset:', e)
+    }
   }
 }
 
@@ -1996,7 +2017,7 @@ onMounted(async () => {
   await Promise.all([
     systemStore.fetchSystemInfo(),
     loadConfig(),
-    loadDevices(),
+    loadDevicesForSection(),
     loadAuthConfig(),
     loadExtensions(),
     loadAtxConfig(),
@@ -2085,7 +2106,7 @@ watch(() => route.query.tab, (tab) => {
                 type="button"
                 v-for="item in group.items"
                 :key="item.id"
-                @click="activeSection = item.id"
+                @click="selectSection(item.id)"
                 :class="[
                   'w-full flex items-center gap-3 px-3 py-2 text-sm rounded-md transition-colors',
                   activeSection === item.id

@@ -23,6 +23,15 @@ const CAPTURE_TIMEOUT_STOP_THRESHOLD: u32 = 60;
 const ENCODE_ERROR_THROTTLE_SECS: u64 = 5;
 const VFMCAP_BUFFER_COUNT: u32 = 12;
 const SIGNAL_INFO_SYSFS: &str = "/sys/class/video4linux/video0/signal_info";
+const HDMIRX_INFO_SYSFS: &str = "/sys/class/hdmirx/hdmirx0/info";
+
+#[derive(Debug, Clone)]
+struct SignalMetadata {
+    bitdepth: u32,
+    signal_type: u32,
+    hdr_status: u32,
+    hdr_eotf: String,
+}
 
 fn sysfs_read_resolution() -> Option<(u32, u32)> {
     let s = std::fs::read_to_string(SIGNAL_INFO_SYSFS).ok()?;
@@ -43,26 +52,52 @@ fn sysfs_read_resolution() -> Option<(u32, u32)> {
     }
 }
 
-fn sysfs_read_signal() -> (u32, u32, u32) {
-    let s = match std::fs::read_to_string(SIGNAL_INFO_SYSFS) {
-        Ok(s) => s,
-        Err(_) => return (0, 8, 0),
-    };
+fn sysfs_read_signal() -> SignalMetadata {
     let mut bitdepth: u32 = 8;
     let mut signal_type: u32 = 0;
     let mut hdr_status: u32 = 0;
-    for line in s.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("bitdepth:") {
-            bitdepth = val.trim().parse().unwrap_or(8);
-        } else if let Some(val) = line.strip_prefix("signal_type:") {
-            signal_type = u32::from_str_radix(val.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+    let mut hdr_eotf = String::from("unknown");
+
+    if let Ok(s) = std::fs::read_to_string(SIGNAL_INFO_SYSFS) {
+        for line in s.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("bitdepth:") {
+                bitdepth = val.trim().parse().unwrap_or(8);
+            } else if let Some(val) = line.strip_prefix("signal_type:") {
+                signal_type =
+                    u32::from_str_radix(val.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+            }
         }
     }
-    if bitdepth >= 10 {
-        hdr_status = 1;
+
+    if let Ok(s) = std::fs::read_to_string(HDMIRX_INFO_SYSFS) {
+        for line in s.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("Color Depth:") {
+                bitdepth = val.trim().parse().unwrap_or(bitdepth);
+            } else if let Some(val) = line.strip_prefix("HDR EOTF:") {
+                hdr_eotf = val.trim().to_string();
+            }
+        }
+
+        let eotf = hdr_eotf.to_ascii_uppercase();
+        hdr_status = if eotf.contains("HLG") {
+            2
+        } else if eotf.contains("HDR10+") || eotf.contains("HDR10PLUS") {
+            3
+        } else if eotf.contains("2084") || eotf.contains("HDR10") || eotf.contains("PQ") {
+            1
+        } else {
+            0
+        };
     }
-    (bitdepth, signal_type, hdr_status)
+
+    SignalMetadata {
+        bitdepth,
+        signal_type,
+        hdr_status,
+        hdr_eotf,
+    }
 }
 
 struct CaptureConfig {
@@ -113,17 +148,17 @@ fn resolve_capture_params(
 fn open_capture_for_resolution(
     config: &AmlPipelineConfig,
 ) -> std::result::Result<CaptureConfig, AppError> {
-    let (bitdepth, _signal_type, hdr_status) = sysfs_read_signal();
+    let signal = sysfs_read_signal();
     let fake_signal_info = VfmcapSignalInfo {
         width: 0,
         height: 0,
         fps: 0,
         pixelformat: 0,
-        signal_type: _signal_type,
-        hdr_status,
+        signal_type: signal.signal_type,
+        hdr_status: signal.hdr_status,
         is_interlaced: 0,
         status: 0,
-        bitdepth,
+        bitdepth: signal.bitdepth,
     };
 
     let (color_mode, output_fmt) = resolve_capture_params(config.hdr_mode, &fake_signal_info);
@@ -135,8 +170,8 @@ fn open_capture_for_resolution(
     };
 
     info!(
-        "AML pipeline: hdr_mode={:?}, sysfs bitdepth={} hdr_status={} -> color_mode={:?} output={:?} img_format={:?}",
-        config.hdr_mode, bitdepth, hdr_status,
+        "AML pipeline: hdr_mode={:?}, hdmi_eotf={} bitdepth={} hdr_status={} signal_type={:#x} -> color_mode={:?} output={:?} img_format={:?}",
+        config.hdr_mode, signal.hdr_eotf, signal.bitdepth, signal.hdr_status, signal.signal_type,
         color_mode, output_fmt, img_format
     );
 
@@ -173,13 +208,20 @@ fn open_capture_for_resolution(
 
     let actual_fps = match capture.signal_info() {
         Ok(info) if info.fps > 0 => {
-            let raw_fps = if info.fps > 1000 { info.fps / 1000 } else { info.fps };
+            let raw_fps = if info.fps > 1000 {
+                info.fps / 1000
+            } else {
+                info.fps
+            };
             let fps = if config.max_fps > 0.0 {
                 raw_fps.min(config.max_fps as u32)
             } else {
                 raw_fps
             };
-            info!("AML pipeline: signal fps_raw={} fps={} using fps={}", info.fps, raw_fps, fps);
+            info!(
+                "AML pipeline: signal fps_raw={} fps={} using fps={}",
+                info.fps, raw_fps, fps
+            );
             fps
         }
         _ => {
@@ -313,15 +355,14 @@ impl AmlPipeline {
         self.keyframe_requested.store(true, Ordering::Release);
     }
 
-    pub fn add_subscriber(
-        &self,
-        tx: tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>,
-    ) {
+    pub fn add_subscriber(&self, tx: tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>) {
         self.latest_subscribers.write().push(tx);
     }
 
     fn subscriber_count(&self) -> usize {
-        self.latest_subscribers.read().len()
+        let mut subs = self.latest_subscribers.write();
+        subs.retain(|tx| !tx.is_closed());
+        subs.len()
     }
 
     fn broadcast_encoded(&self, frame: Arc<EncodedVideoFrame>) {
@@ -416,7 +457,9 @@ impl AmlPipeline {
                         if sequence <= 5 || sequence % 60 == 0 {
                             info!(
                                 "AML pipeline: encoded frame (seq={}, key={}, size={})",
-                                sequence, frame.is_keyframe, frame.data.len()
+                                sequence,
+                                frame.is_keyframe,
+                                frame.data.len()
                             );
                         }
                         pipeline.broadcast_encoded(frame);
@@ -438,7 +481,12 @@ impl AmlPipeline {
 
         // Outer loop: handles initial startup and reconfiguration restarts
         'outer: while self.running_flag.load(Ordering::Acquire) {
-            let CaptureConfig { mut capture, resolution: actual_resolution, fps: actual_fps, img_format } = match open_capture_for_resolution(config) {
+            let CaptureConfig {
+                mut capture,
+                resolution: actual_resolution,
+                fps: actual_fps,
+                img_format,
+            } = match open_capture_for_resolution(config) {
                 Ok(r) => r,
                 Err(e) => {
                     error!("Failed to open vfmcap: {}", e);
@@ -455,7 +503,13 @@ impl AmlPipeline {
                 actual_resolution.width, actual_resolution.height, actual_fps, img_format
             );
 
-            let mut encoder = match create_encoder(config, actual_resolution.width as i32, actual_resolution.height as i32, actual_fps as i32, img_format) {
+            let mut encoder = match create_encoder(
+                config,
+                actual_resolution.width as i32,
+                actual_resolution.height as i32,
+                actual_fps as i32,
+                img_format,
+            ) {
                 Ok(e) => e,
                 Err(e) => {
                     error!("Failed to create AML encoder: {}", e);
@@ -467,16 +521,20 @@ impl AmlPipeline {
 
             info!(
                 "AML pipeline: encoder created {}x{} @ {}fps codec={:?} bit_depth={}",
-                actual_resolution.width, actual_resolution.height, actual_fps, config.output_codec,
-                if img_format == VlImgFormat::P010 { 10 } else { 8 }
+                actual_resolution.width,
+                actual_resolution.height,
+                actual_fps,
+                config.output_codec,
+                if img_format == VlImgFormat::P010 {
+                    10
+                } else {
+                    8
+                }
             );
 
             match encoder.generate_header() {
                 Ok(header) => {
-                    info!(
-                        "AML pipeline: generated header ({} bytes)",
-                        header.len()
-                    );
+                    info!("AML pipeline: generated header ({} bytes)", header.len());
                     let header_frame = Arc::new(EncodedVideoFrame {
                         data: Bytes::from(header),
                         pts_ms: 0,
@@ -501,11 +559,19 @@ impl AmlPipeline {
             let codec = config.output_codec;
             let fps_for_duration = actual_fps;
             let encode_handle = std::thread::spawn(move || {
-                Self::run_encode_thread(pipeline, encoder, frame_rx, release_tx, codec, fps_for_duration);
+                Self::run_encode_thread(
+                    pipeline,
+                    encoder,
+                    frame_rx,
+                    release_tx,
+                    codec,
+                    fps_for_duration,
+                );
             });
 
             // Capture loop state
-            let mut pending_releases: std::collections::VecDeque<DmaBufFrame> = std::collections::VecDeque::new();
+            let mut pending_releases: std::collections::VecDeque<DmaBufFrame> =
+                std::collections::VecDeque::new();
             let mut consecutive_timeouts: u32 = 0;
             let mut consecutive_errors: u32 = 0;
             let mut source_change_detected = false;
@@ -563,7 +629,10 @@ impl AmlPipeline {
                                 break;
                             }
                             if consecutive_errors >= CAPTURE_TIMEOUT_STOP_THRESHOLD {
-                                warn!("AML capture: {} consecutive errors, stopping", consecutive_errors);
+                                warn!(
+                                    "AML capture: {} consecutive errors, stopping",
+                                    consecutive_errors
+                                );
                                 break;
                             }
                         }
@@ -709,7 +778,10 @@ fn wait_for_stable_signal_sysfs(
         }
 
         if start.elapsed().as_secs() >= MAX_WAIT_SECS {
-            warn!("AML pipeline: signal stability timed out after {}s", MAX_WAIT_SECS);
+            warn!(
+                "AML pipeline: signal stability timed out after {}s",
+                MAX_WAIT_SECS
+            );
             return None;
         }
 
@@ -746,7 +818,10 @@ fn wait_for_stable_signal_sysfs(
                     };
                     info!(
                         "AML pipeline: signal stable at {}x{} (target {}x{}) after {:.1}s",
-                        last_w, last_h, tw, th,
+                        last_w,
+                        last_h,
+                        tw,
+                        th,
                         start.elapsed().as_secs_f32()
                     );
                     return Some(Resolution::new(tw, th));

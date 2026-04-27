@@ -159,8 +159,25 @@ impl SharedVideoPipeline {
         }
 
         aml.start().await?;
-        *self.aml_pipeline.lock().await = Some(aml);
+        *self.aml_pipeline.lock().await = Some(aml.clone());
         let _ = self.running.send(true);
+
+        let mut aml_running = aml.subscribe();
+        let running = self.running.clone();
+        tokio::spawn(async move {
+            loop {
+                if !*aml_running.borrow() {
+                    let _ = running.send(false);
+                    info!("AML pipeline stopped; marking shared pipeline stopped");
+                    break;
+                }
+
+                if aml_running.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+
         Ok(())
     }
 

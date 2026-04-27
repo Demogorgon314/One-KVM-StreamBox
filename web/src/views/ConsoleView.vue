@@ -859,6 +859,8 @@ function cancelWebRTCRecovery() {
 }
 
 function handleStreamRecovered(_data: { device: string }) {
+  if (!isConsoleActive.value) return
+
   // Cancel any pending recovery timer – backend is back
   cancelWebRTCRecovery()
 
@@ -875,6 +877,8 @@ async function handleAudioStateChanged(data: { streaming: boolean; device: strin
     unifiedAudio.disconnect()
     return
   }
+
+  if (!isConsoleActive.value) return
 
   // Audio started streaming
   if (videoMode.value !== 'mjpeg' && webrtc.isConnected.value) {
@@ -903,6 +907,8 @@ async function handleAudioStateChanged(data: { streaming: boolean; device: strin
 }
 
 function handleStreamConfigChanging(data: any) {
+  if (!isConsoleActive.value) return
+
   // Clear any existing retries and grace periods
   if (retryTimeoutId !== null) {
     clearTimeout(retryTimeoutId)
@@ -931,6 +937,8 @@ function handleStreamConfigChanging(data: any) {
 }
 
 async function handleStreamConfigApplied(data: any) {
+  if (!isConsoleActive.value) return
+
   // Reset consecutive error counter for new config
   consecutiveErrors = 0
 
@@ -968,12 +976,16 @@ async function handleStreamConfigApplied(data: any) {
 
 // 处理 WebRTC 就绪事件 - 这是后端真正准备好接受 WebRTC 连接的信号
 function handleWebRTCReady(data: { codec: string; hardware: boolean; transition_id?: string }) {
+  if (!isConsoleActive.value) return
+
   console.log(`[WebRTCReady] Backend ready: codec=${data.codec}, hardware=${data.hardware}, transition_id=${data.transition_id || '-'}`)
   pendingWebRTCReadyGate = false
   videoSession.onWebRTCReady(data)
 }
 
 function handleStreamModeReady(data: { transition_id: string; mode: string }) {
+  if (!isConsoleActive.value) return
+
   videoSession.onModeReady(data)
   if (data.mode === 'mjpeg') {
     pendingWebRTCReadyGate = false
@@ -982,6 +994,8 @@ function handleStreamModeReady(data: { transition_id: string; mode: string }) {
 }
 
 function handleStreamModeSwitching(data: { transition_id: string; to_mode: string; from_mode: string }) {
+  if (!isConsoleActive.value) return
+
   // External mode switches: keep UI responsive and avoid black flash
   if (!isModeSwitching.value) {
     videoRestarting.value = true
@@ -993,6 +1007,8 @@ function handleStreamModeSwitching(data: { transition_id: string; to_mode: strin
 }
 
 function handleStreamStateChanged(data: any) {
+  if (!isConsoleActive.value) return
+
   if (data.state === 'error') {
     videoError.value = true
     videoErrorMessage.value = t('console.streamError')
@@ -1102,6 +1118,8 @@ function handleDeviceInfo(data: any) {
     return
   }
 
+  if (!isConsoleActive.value) return
+
   // Sync video mode from server's stream_mode
   if (data.video?.stream_mode) {
     const serverMode = normalizeServerMode(data.video.stream_mode)
@@ -1124,6 +1142,8 @@ function handleDeviceInfo(data: any) {
 
 // Handle stream mode change event from server (WebSocket broadcast)
 function handleStreamModeChanged(data: { mode: string; previous_mode: string }) {
+  if (!isConsoleActive.value) return
+
   const newMode = normalizeServerMode(data.mode)
   if (!newMode) return
 
@@ -2201,6 +2221,20 @@ function deactivateConsoleView() {
   handleBlur()
   exitPointerLock()
   unregisterInteractionListeners()
+  cancelWebRTCRecovery()
+
+  if (webrtcReconnectTimeout) {
+    clearTimeout(webrtcReconnectTimeout)
+    webrtcReconnectTimeout = null
+  }
+
+  if (videoMode.value !== 'mjpeg' && (webrtc.isConnected.value || webrtc.isConnecting.value || webrtc.sessionId.value)) {
+    void webrtc.disconnect()
+  }
+
+  if (webrtcVideoRef.value) {
+    webrtcVideoRef.value.srcObject = null
+  }
 }
 
 // ActionBar handlers

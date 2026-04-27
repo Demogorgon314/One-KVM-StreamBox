@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
 
@@ -217,11 +218,16 @@ impl WebRtcStreamer {
         };
 
         if let Some(pipeline) = old_pipeline {
-            pipeline.stop_and_wait(std::time::Duration::from_secs(3)).await;
+            pipeline
+                .stop_and_wait(std::time::Duration::from_secs(3))
+                .await;
         }
 
         if self.capture_device.read().await.is_none() {
-            info!("No capture source configured; {} will apply on next pipeline start", reason);
+            info!(
+                "No capture source configured; {} will apply on next pipeline start",
+                reason
+            );
             return Ok(());
         }
 
@@ -588,13 +594,21 @@ impl WebRtcStreamer {
         let config = self.config.read().await;
         info!(
             "WebRTC config updated: {}x{} {:?} @ {} fps, {}, hdr_mode={:?}",
-            resolution.width, resolution.height, format, fps, config.bitrate_preset, config.hdr_mode
+            resolution.width,
+            resolution.height,
+            format,
+            fps,
+            config.bitrate_preset,
+            config.hdr_mode
         );
         Ok(())
     }
 
     /// Update encoder backend (software/hardware selection)
-    pub async fn update_encoder_backend(self: &Arc<Self>, encoder_backend: Option<EncoderBackend>) -> Result<()> {
+    pub async fn update_encoder_backend(
+        self: &Arc<Self>,
+        encoder_backend: Option<EncoderBackend>,
+    ) -> Result<()> {
         // Update config
         let mut config = self.config.write().await;
         if config.encoder_backend == encoder_backend {
@@ -711,6 +725,8 @@ impl WebRtcStreamer {
 
     /// Create a new WebRTC session
     pub async fn create_session(self: &Arc<Self>) -> Result<String> {
+        self.cleanup().await;
+
         let session_id = uuid::Uuid::new_v4().to_string();
         let codec = *self.video_codec.read().await;
 
@@ -778,7 +794,80 @@ impl WebRtcStreamer {
         self.sessions
             .write()
             .await
-            .insert(session_id.clone(), session);
+            .insert(session_id.clone(), session.clone());
+
+        let mut state_rx = session.state_watch();
+        let streamer = Arc::downgrade(self);
+        let monitor_session_id = session_id.clone();
+        tokio::spawn(async move {
+            loop {
+                let state = *state_rx.borrow();
+                if matches!(
+                    state,
+                    ConnectionState::Closed
+                        | ConnectionState::Failed
+                        | ConnectionState::Disconnected
+                ) {
+                    if let Some(streamer) = streamer.upgrade() {
+                        let removed = streamer
+                            .sessions
+                            .write()
+                            .await
+                            .remove(&monitor_session_id)
+                            .is_some();
+                        if removed {
+                            info!(
+                                "Auto-removed WebRTC session {} after state {:?}",
+                                monitor_session_id, state
+                            );
+                        }
+                        streamer
+                            .stop_pipeline_if_idle("After session state cleanup")
+                            .await;
+                    }
+                    break;
+                }
+
+                if state_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let timeout_session = session.clone();
+        let timeout_streamer = Arc::downgrade(self);
+        let timeout_session_id = session_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let state = timeout_session.state();
+            if !matches!(state, ConnectionState::New | ConnectionState::Connecting) {
+                return;
+            }
+
+            if let Some(streamer) = timeout_streamer.upgrade() {
+                let removed = streamer
+                    .sessions
+                    .write()
+                    .await
+                    .remove(&timeout_session_id)
+                    .is_some();
+                if removed {
+                    info!(
+                        "Closing stale WebRTC session {} after setup timeout (state={:?})",
+                        timeout_session_id, state
+                    );
+                    if let Err(e) = timeout_session.close().await {
+                        warn!(
+                            "Error closing stale WebRTC session {}: {}",
+                            timeout_session_id, e
+                        );
+                    }
+                }
+                streamer
+                    .stop_pipeline_if_idle("After stale session timeout")
+                    .await;
+            }
+        });
 
         info!(
             "Session created: {} (codec={:?}, audio={}, {} total)",

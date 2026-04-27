@@ -1001,6 +1001,23 @@ pub struct DeviceList {
     pub extensions: ExtensionsAvailability,
 }
 
+#[derive(Deserialize, Default)]
+pub struct DeviceListQuery {
+    /// Comma-separated device groups to probe: video,serial,audio,udc.
+    /// Empty keeps the legacy behavior and probes all groups.
+    pub include: Option<String>,
+}
+
+impl DeviceListQuery {
+    fn wants(&self, group: &str) -> bool {
+        self.include.as_deref().map_or(true, |include| {
+            include
+                .split(',')
+                .any(|item| item.trim().eq_ignore_ascii_case(group))
+        })
+    }
+}
+
 #[derive(Serialize)]
 pub struct ExtensionsAvailability {
     pub ttyd_available: bool,
@@ -1078,64 +1095,73 @@ fn extract_usb_bus_from_bus_info(bus_info: &str) -> Option<String> {
     None
 }
 
-pub async fn list_devices(State(state): State<Arc<AppState>>) -> Json<DeviceList> {
+pub async fn list_devices(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<DeviceListQuery>,
+) -> Json<DeviceList> {
     // Detect video devices
-    let video_devices = match state.stream_manager.list_devices().await {
-        Ok(devices) => devices
-            .into_iter()
-            .map(|d| {
-                // Extract USB bus from bus_info (e.g., "usb-0000:00:14.0-1" -> "1")
-                // or "usb-xhci-hcd.0-1.2" -> "1.2"
-                let usb_bus = extract_usb_bus_from_bus_info(&d.bus_info);
-                VideoDevice {
-                    path: d.path.to_string_lossy().to_string(),
-                    name: d.name,
-                    driver: d.driver,
-                    formats: d
-                        .formats
-                        .iter()
-                        .map(|f| VideoFormat {
-                            format: format!("{}", f.format),
-                            description: f.description.clone(),
-                            resolutions: f
-                                .resolutions
-                                .iter()
-                                .map(|r| VideoResolution {
-                                    width: r.width,
-                                    height: r.height,
-                                    fps: r.fps.clone(),
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                    usb_bus,
-                }
-            })
-            .collect(),
-        Err(_) => vec![],
+    let video_devices = if query.wants("video") {
+        match state.stream_manager.list_devices().await {
+            Ok(devices) => devices
+                .into_iter()
+                .map(|d| {
+                    // Extract USB bus from bus_info (e.g., "usb-0000:00:14.0-1" -> "1")
+                    // or "usb-xhci-hcd.0-1.2" -> "1.2"
+                    let usb_bus = extract_usb_bus_from_bus_info(&d.bus_info);
+                    VideoDevice {
+                        path: d.path.to_string_lossy().to_string(),
+                        name: d.name,
+                        driver: d.driver,
+                        formats: d
+                            .formats
+                            .iter()
+                            .map(|f| VideoFormat {
+                                format: format!("{}", f.format),
+                                description: f.description.clone(),
+                                resolutions: f
+                                    .resolutions
+                                    .iter()
+                                    .map(|r| VideoResolution {
+                                        width: r.width,
+                                        height: r.height,
+                                        fps: r.fps.clone(),
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                        usb_bus,
+                    }
+                })
+                .collect(),
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
     };
 
     // Detect serial devices (common USB/ACM ports) - single directory read
     let serial_prefixes = ["ttyUSB", "ttyACM", "ttyS"];
     let mut serial_devices = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/dev") {
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let name = match file_name.to_str() {
-                Some(n) => n,
-                None => continue,
-            };
-            // Check if matches any prefix
-            if serial_prefixes
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-            {
-                let path = entry.path();
-                if let Some(p) = path.to_str() {
-                    serial_devices.push(SerialDevice {
-                        path: p.to_string(),
-                        name: name.to_string(),
-                    });
+    if query.wants("serial") {
+        if let Ok(entries) = std::fs::read_dir("/dev") {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let name = match file_name.to_str() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                // Check if matches any prefix
+                if serial_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                {
+                    let path = entry.path();
+                    if let Some(p) = path.to_str() {
+                        serial_devices.push(SerialDevice {
+                            path: p.to_string(),
+                            name: name.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -1144,29 +1170,35 @@ pub async fn list_devices(State(state): State<Arc<AppState>>) -> Json<DeviceList
 
     // Detect UDC (USB Device Controller) devices
     let mut udc_devices = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/sys/class/udc") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                udc_devices.push(UdcDevice {
-                    name: name.to_string(),
-                });
+    if query.wants("udc") {
+        if let Ok(entries) = std::fs::read_dir("/sys/class/udc") {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    udc_devices.push(UdcDevice {
+                        name: name.to_string(),
+                    });
+                }
             }
         }
     }
     udc_devices.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Detect audio devices
-    let audio_devices = match state.audio.list_devices().await {
-        Ok(devices) => devices
-            .into_iter()
-            .map(|d| AudioDevice {
-                name: d.name,
-                description: d.description,
-                is_hdmi: d.is_hdmi,
-                usb_bus: d.usb_bus,
-            })
-            .collect(),
-        Err(_) => vec![],
+    let audio_devices = if query.wants("audio") {
+        match state.audio.list_devices().await {
+            Ok(devices) => devices
+                .into_iter()
+                .map(|d| AudioDevice {
+                    name: d.name,
+                    description: d.description,
+                    is_hdmi: d.is_hdmi,
+                    usb_bus: d.usb_bus,
+                })
+                .collect(),
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
     };
 
     // Check extension availability

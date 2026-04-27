@@ -633,7 +633,8 @@ export const configApi = {
       body: JSON.stringify(updates),
     }),
 
-  listDevices: async () => {
+  listDevices: async (include?: Array<'video' | 'serial' | 'audio' | 'udc'>) => {
+    const query = include?.length ? `?include=${include.join(',')}` : ''
     const result = await request<{
       video: Array<{
         path: string
@@ -662,7 +663,7 @@ export const configApi = {
         ttyd_available: boolean
         rustdesk_available: boolean
       }
-    }>('/devices')
+    }>(`/devices${query}`)
 
     return {
       ...result,

@@ -66,7 +66,13 @@ pub async fn apply_video_config(
 
     state
         .stream_manager
-        .apply_video_config(&device, format, resolution, new_config.fps, new_config.hdr_mode)
+        .apply_video_config(
+            &device,
+            format,
+            resolution,
+            new_config.fps,
+            new_config.hdr_mode,
+        )
         .await
         .map_err(|e| AppError::VideoError(format!("Failed to apply video config: {}", e)))?;
 
