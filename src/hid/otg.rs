@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -136,6 +136,12 @@ pub struct OtgBackend {
     keyboard_state: Mutex<KeyboardReport>,
     /// Current mouse button state
     mouse_buttons: AtomicU8,
+    /// Whether the most recent mouse movement used the absolute interface.
+    mouse_absolute_active: AtomicBool,
+    /// Last absolute pointer X coordinate.
+    mouse_abs_x: AtomicU16,
+    /// Last absolute pointer Y coordinate.
+    mouse_abs_y: AtomicU16,
     /// Last known LED state (using parking_lot::RwLock for sync access)
     led_state: Arc<parking_lot::RwLock<LedState>>,
     /// Screen resolution for absolute mouse (using parking_lot::RwLock for sync access)
@@ -184,6 +190,9 @@ impl OtgBackend {
             keyboard_leds_enabled: paths.keyboard_leds_enabled,
             keyboard_state: Mutex::new(KeyboardReport::default()),
             mouse_buttons: AtomicU8::new(0),
+            mouse_absolute_active: AtomicBool::new(false),
+            mouse_abs_x: AtomicU16::new(0),
+            mouse_abs_y: AtomicU16::new(0),
             led_state: Arc::new(parking_lot::RwLock::new(LedState::default())),
             screen_resolution: parking_lot::RwLock::new(Some((1920, 1080))),
             udc_name: Arc::new(parking_lot::RwLock::new(paths.udc)),
@@ -1109,26 +1118,37 @@ impl HidBackend for OtgBackend {
         let buttons = self.mouse_buttons.load(Ordering::Relaxed);
         let has_abs = self.mouse_abs_path.is_some();
         let has_rel = self.mouse_rel_path.is_some();
+        let abs_active = self.mouse_absolute_active.load(Ordering::Relaxed);
 
         match event.event_type {
             MouseEventType::Move => {
+                self.mouse_absolute_active.store(false, Ordering::Relaxed);
                 let dx = event.x.clamp(-127, 127) as i8;
                 let dy = event.y.clamp(-127, 127) as i8;
                 self.send_mouse_report_relative(buttons, dx, dy, 0)?;
             }
             MouseEventType::MoveAbs => {
+                self.mouse_absolute_active.store(true, Ordering::Relaxed);
                 let x = event.x.clamp(0, 32767) as u16;
                 let y = event.y.clamp(0, 32767) as u16;
-                self.send_mouse_report_absolute(0, x, y, 0)?;
+                self.mouse_abs_x.store(x, Ordering::Relaxed);
+                self.mouse_abs_y.store(y, Ordering::Relaxed);
+                self.send_mouse_report_absolute(buttons, x, y, 0)?;
             }
             MouseEventType::Down => {
                 if let Some(button) = event.button {
                     let bit = button.to_hid_bit();
                     let new_buttons = self.mouse_buttons.fetch_or(bit, Ordering::Relaxed) | bit;
-                    if has_rel {
+                    if abs_active && has_abs {
+                        let x = self.mouse_abs_x.load(Ordering::Relaxed);
+                        let y = self.mouse_abs_y.load(Ordering::Relaxed);
+                        self.send_mouse_report_absolute(new_buttons, x, y, 0)?;
+                    } else if has_rel {
                         self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
                     } else if has_abs {
-                        self.send_mouse_report_absolute(new_buttons, 0, 0, 0)?;
+                        let x = self.mouse_abs_x.load(Ordering::Relaxed);
+                        let y = self.mouse_abs_y.load(Ordering::Relaxed);
+                        self.send_mouse_report_absolute(new_buttons, x, y, 0)?;
                     }
                 }
             }
@@ -1136,18 +1156,30 @@ impl HidBackend for OtgBackend {
                 if let Some(button) = event.button {
                     let bit = button.to_hid_bit();
                     let new_buttons = self.mouse_buttons.fetch_and(!bit, Ordering::Relaxed) & !bit;
-                    if has_rel {
+                    if abs_active && has_abs {
+                        let x = self.mouse_abs_x.load(Ordering::Relaxed);
+                        let y = self.mouse_abs_y.load(Ordering::Relaxed);
+                        self.send_mouse_report_absolute(new_buttons, x, y, 0)?;
+                    } else if has_rel {
                         self.send_mouse_report_relative(new_buttons, 0, 0, 0)?;
                     } else if has_abs {
-                        self.send_mouse_report_absolute(new_buttons, 0, 0, 0)?;
+                        let x = self.mouse_abs_x.load(Ordering::Relaxed);
+                        let y = self.mouse_abs_y.load(Ordering::Relaxed);
+                        self.send_mouse_report_absolute(new_buttons, x, y, 0)?;
                     }
                 }
             }
             MouseEventType::Scroll => {
-                if has_rel {
+                if abs_active && has_abs {
+                    let x = self.mouse_abs_x.load(Ordering::Relaxed);
+                    let y = self.mouse_abs_y.load(Ordering::Relaxed);
+                    self.send_mouse_report_absolute(buttons, x, y, event.scroll)?;
+                } else if has_rel {
                     self.send_mouse_report_relative(buttons, 0, 0, event.scroll)?;
                 } else if has_abs {
-                    self.send_mouse_report_absolute(buttons, 0, 0, event.scroll)?;
+                    let x = self.mouse_abs_x.load(Ordering::Relaxed);
+                    let y = self.mouse_abs_y.load(Ordering::Relaxed);
+                    self.send_mouse_report_absolute(buttons, x, y, event.scroll)?;
                 }
             }
         }
@@ -1167,6 +1199,9 @@ impl HidBackend for OtgBackend {
 
         // Reset mouse
         self.mouse_buttons.store(0, Ordering::Relaxed);
+        self.mouse_absolute_active.store(false, Ordering::Relaxed);
+        self.mouse_abs_x.store(0, Ordering::Relaxed);
+        self.mouse_abs_y.store(0, Ordering::Relaxed);
         self.send_mouse_report_relative(0, 0, 0, 0)?;
         self.send_mouse_report_absolute(0, 0, 0, 0)?;
 
