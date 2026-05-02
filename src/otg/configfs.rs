@@ -97,6 +97,43 @@ pub fn resolve_udc_name(preferred: Option<&str>) -> Option<String> {
     find_udc()
 }
 
+/// Unbind any other ConfigFS gadget currently occupying the selected UDC.
+pub fn unbind_other_gadgets_using_udc(udc: &str, except_gadget: &str) -> Result<Vec<String>> {
+    let mut unbound = Vec::new();
+    let base = Path::new(CONFIGFS_PATH);
+    if !base.exists() {
+        return Ok(unbound);
+    }
+
+    let entries = fs::read_dir(base).map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to read USB gadget configfs directory {}: {}",
+            base.display(),
+            e
+        ))
+    })?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == except_gadget {
+            continue;
+        }
+
+        let udc_path = entry.path().join("UDC");
+        let Ok(bound_udc) = fs::read_to_string(&udc_path) else {
+            continue;
+        };
+        if bound_udc.trim() != udc {
+            continue;
+        }
+
+        write_file(&udc_path, "")?;
+        unbound.push(name);
+    }
+
+    Ok(unbound)
+}
+
 /// Write string content to a file
 ///
 /// For sysfs files, this function appends a newline and flushes

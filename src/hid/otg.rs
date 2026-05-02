@@ -132,6 +132,8 @@ pub struct OtgBackend {
     consumer_dev: Mutex<Option<File>>,
     /// Whether keyboard LED/status feedback is enabled.
     keyboard_leds_enabled: bool,
+    /// Whether keyboard/mouse reports share a single HID function with report IDs.
+    composite_hid: bool,
     /// Current keyboard state
     keyboard_state: Mutex<KeyboardReport>,
     /// Current mouse button state
@@ -188,6 +190,7 @@ impl OtgBackend {
             mouse_abs_dev: Mutex::new(None),
             consumer_dev: Mutex::new(None),
             keyboard_leds_enabled: paths.keyboard_leds_enabled,
+            composite_hid: paths.composite_hid,
             keyboard_state: Mutex::new(KeyboardReport::default()),
             mouse_buttons: AtomicU8::new(0),
             mouse_absolute_active: AtomicBool::new(false),
@@ -298,6 +301,66 @@ impl OtgBackend {
             }
             Ok(_) => Ok(false),
             Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+
+    fn effective_device_type(&self, device_type: DeviceType) -> DeviceType {
+        if self.composite_hid {
+            DeviceType::Keyboard
+        } else {
+            device_type
+        }
+    }
+
+    fn device_mutex(&self, device_type: DeviceType) -> &Mutex<Option<File>> {
+        match device_type {
+            DeviceType::Keyboard => &self.keyboard_dev,
+            DeviceType::MouseRelative => &self.mouse_rel_dev,
+            DeviceType::MouseAbsolute => &self.mouse_abs_dev,
+            DeviceType::ConsumerControl => &self.consumer_dev,
+        }
+    }
+
+    fn write_report_to_device(
+        &self,
+        device_type: DeviceType,
+        data: &[u8],
+        operation: &str,
+    ) -> Result<bool> {
+        let effective_device_type = self.effective_device_type(device_type);
+        self.ensure_device(effective_device_type)?;
+
+        let mut dev = self.device_mutex(effective_device_type).lock();
+        let Some(ref mut file) = *dev else {
+            return Err(AppError::HidError {
+                backend: "otg".to_string(),
+                reason: format!("{} device not opened", operation),
+                error_code: "not_opened".to_string(),
+            });
+        };
+
+        match self.write_with_timeout(file, data) {
+            Ok(true) => {
+                self.mark_online();
+                self.reset_error_count();
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(e) => match e.raw_os_error() {
+                Some(108) => {
+                    self.eagain_count.store(0, Ordering::Relaxed);
+                    *dev = None;
+                    self.record_error(format!("{}: {}", operation, e), "eshutdown");
+                    Err(Self::io_error_to_hid_error(e, operation))
+                }
+                Some(11) => Ok(false),
+                _ => {
+                    self.eagain_count.store(0, Ordering::Relaxed);
+                    warn!("{}: {}", operation, e);
+                    self.record_error(format!("{}: {}", operation, e), Self::io_error_code(&e));
+                    Err(Self::io_error_to_hid_error(e, operation))
+                }
+            },
         }
     }
 
@@ -503,68 +566,29 @@ impl OtgBackend {
             return Ok(());
         }
 
-        // Ensure device is ready
-        self.ensure_device(DeviceType::Keyboard)?;
-
-        let mut dev = self.keyboard_dev.lock();
-        if let Some(ref mut file) = *dev {
-            let data = report.to_bytes();
-            match self.write_with_timeout(file, &data) {
-                Ok(true) => {
-                    self.mark_online();
-                    self.reset_error_count();
-                    debug!("Sent keyboard report: {:02X?}", data);
-                    Ok(())
-                }
-                Ok(false) => {
-                    // Timeout - silently dropped (JetKVM behavior)
-                    self.log_throttled_error("HID keyboard write timeout, dropped");
-                    Ok(())
-                }
-                Err(e) => {
-                    let error_code = e.raw_os_error();
-
-                    match error_code {
-                        Some(108) => {
-                            // ESHUTDOWN - endpoint closed, need to reopen device
-                            self.eagain_count.store(0, Ordering::Relaxed);
-                            debug!("Keyboard ESHUTDOWN, closing for recovery");
-                            *dev = None;
-                            self.record_error(
-                                format!("Failed to write keyboard report: {}", e),
-                                "eshutdown",
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write keyboard report",
-                            ))
-                        }
-                        Some(11) => {
-                            // EAGAIN after poll - should be rare, silently drop
-                            trace!("Keyboard EAGAIN after poll, dropping");
-                            Ok(())
-                        }
-                        _ => {
-                            self.eagain_count.store(0, Ordering::Relaxed);
-                            warn!("Keyboard write error: {}", e);
-                            self.record_error(
-                                format!("Failed to write keyboard report: {}", e),
-                                Self::io_error_code(&e),
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write keyboard report",
-                            ))
-                        }
-                    }
-                }
-            }
+        let plain = report.to_bytes();
+        let mut composite = [0u8; 9];
+        let data = if self.composite_hid {
+            composite[0] = 1;
+            composite[1..].copy_from_slice(&plain);
+            composite.as_slice()
         } else {
-            Err(AppError::HidError {
-                backend: "otg".to_string(),
-                reason: "Keyboard device not opened".to_string(),
-                error_code: "not_opened".to_string(),
-            })
+            plain.as_slice()
+        };
+
+        match self.write_report_to_device(
+            DeviceType::Keyboard,
+            data,
+            "Failed to write keyboard report",
+        )? {
+            true => {
+                debug!("Sent keyboard report: {:02X?}", data);
+                Ok(())
+            }
+            false => {
+                self.log_throttled_error("HID keyboard write timeout, dropped");
+                Ok(())
+            }
         }
     }
 
@@ -578,66 +602,24 @@ impl OtgBackend {
             return Ok(());
         }
 
-        // Ensure device is ready
-        self.ensure_device(DeviceType::MouseRelative)?;
-
-        let mut dev = self.mouse_rel_dev.lock();
-        if let Some(ref mut file) = *dev {
-            let data = [buttons, dx as u8, dy as u8, wheel as u8];
-            match self.write_with_timeout(file, &data) {
-                Ok(true) => {
-                    self.mark_online();
-                    self.reset_error_count();
-                    trace!("Sent relative mouse report: {:02X?}", data);
-                    Ok(())
-                }
-                Ok(false) => {
-                    // Timeout - silently dropped (JetKVM behavior)
-                    Ok(())
-                }
-                Err(e) => {
-                    let error_code = e.raw_os_error();
-
-                    match error_code {
-                        Some(108) => {
-                            self.eagain_count.store(0, Ordering::Relaxed);
-                            debug!("Relative mouse ESHUTDOWN, closing for recovery");
-                            *dev = None;
-                            self.record_error(
-                                format!("Failed to write mouse report: {}", e),
-                                "eshutdown",
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write mouse report",
-                            ))
-                        }
-                        Some(11) => {
-                            // EAGAIN after poll - should be rare, silently drop
-                            Ok(())
-                        }
-                        _ => {
-                            self.eagain_count.store(0, Ordering::Relaxed);
-                            warn!("Relative mouse write error: {}", e);
-                            self.record_error(
-                                format!("Failed to write mouse report: {}", e),
-                                Self::io_error_code(&e),
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write mouse report",
-                            ))
-                        }
-                    }
-                }
-            }
+        let plain = [buttons, dx as u8, dy as u8, wheel as u8];
+        let mut composite = [0u8; 9];
+        let data = if self.composite_hid {
+            composite[0] = 2;
+            composite[1..5].copy_from_slice(&plain);
+            composite.as_slice()
         } else {
-            Err(AppError::HidError {
-                backend: "otg".to_string(),
-                reason: "Relative mouse device not opened".to_string(),
-                error_code: "not_opened".to_string(),
-            })
+            plain.as_slice()
+        };
+
+        if self.write_report_to_device(
+            DeviceType::MouseRelative,
+            data,
+            "Failed to write mouse report",
+        )? {
+            trace!("Sent relative mouse report: {:02X?}", data);
         }
+        Ok(())
     }
 
     /// Send absolute mouse report (6 bytes: buttons, x_lo, x_hi, y_lo, y_hi, wheel)
@@ -650,72 +632,29 @@ impl OtgBackend {
             return Ok(());
         }
 
-        // Ensure device is ready
-        self.ensure_device(DeviceType::MouseAbsolute)?;
-
-        let mut dev = self.mouse_abs_dev.lock();
-        if let Some(ref mut file) = *dev {
-            let data = [
-                buttons,
-                (x & 0xFF) as u8,
-                (x >> 8) as u8,
-                (y & 0xFF) as u8,
-                (y >> 8) as u8,
-                wheel as u8,
-            ];
-            match self.write_with_timeout(file, &data) {
-                Ok(true) => {
-                    self.mark_online();
-                    self.reset_error_count();
-                    Ok(())
-                }
-                Ok(false) => {
-                    // Timeout - silently dropped (JetKVM behavior)
-                    Ok(())
-                }
-                Err(e) => {
-                    let error_code = e.raw_os_error();
-
-                    match error_code {
-                        Some(108) => {
-                            self.eagain_count.store(0, Ordering::Relaxed);
-                            debug!("Absolute mouse ESHUTDOWN, closing for recovery");
-                            *dev = None;
-                            self.record_error(
-                                format!("Failed to write mouse report: {}", e),
-                                "eshutdown",
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write mouse report",
-                            ))
-                        }
-                        Some(11) => {
-                            // EAGAIN after poll - should be rare, silently drop
-                            Ok(())
-                        }
-                        _ => {
-                            self.eagain_count.store(0, Ordering::Relaxed);
-                            warn!("Absolute mouse write error: {}", e);
-                            self.record_error(
-                                format!("Failed to write mouse report: {}", e),
-                                Self::io_error_code(&e),
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write mouse report",
-                            ))
-                        }
-                    }
-                }
-            }
+        let plain = [
+            buttons,
+            (x & 0xFF) as u8,
+            (x >> 8) as u8,
+            (y & 0xFF) as u8,
+            (y >> 8) as u8,
+            wheel as u8,
+        ];
+        let mut composite = [0u8; 9];
+        let data = if self.composite_hid {
+            composite[0] = 3;
+            composite[1..7].copy_from_slice(&plain);
+            composite.as_slice()
         } else {
-            Err(AppError::HidError {
-                backend: "otg".to_string(),
-                reason: "Absolute mouse device not opened".to_string(),
-                error_code: "not_opened".to_string(),
-            })
-        }
+            plain.as_slice()
+        };
+
+        let _ = self.write_report_to_device(
+            DeviceType::MouseAbsolute,
+            data,
+            "Failed to write mouse report",
+        )?;
+        Ok(())
     }
 
     /// Send consumer control report (2 bytes: usage_lo, usage_hi)
@@ -726,67 +665,33 @@ impl OtgBackend {
             return Ok(());
         }
 
-        // Ensure device is ready
-        self.ensure_device(DeviceType::ConsumerControl)?;
-
-        let mut dev = self.consumer_dev.lock();
-        if let Some(ref mut file) = *dev {
-            // Send the usage code
-            let data = [(usage & 0xFF) as u8, (usage >> 8) as u8];
-            match self.write_with_timeout(file, &data) {
-                Ok(true) => {
-                    trace!("Sent consumer report: {:02X?}", data);
-                    // Send release (0x0000)
-                    let release = [0u8, 0u8];
-                    let _ = self.write_with_timeout(file, &release);
-                    self.mark_online();
-                    self.reset_error_count();
-                    Ok(())
-                }
-                Ok(false) => {
-                    // Timeout - silently dropped
-                    Ok(())
-                }
-                Err(e) => {
-                    let error_code = e.raw_os_error();
-                    match error_code {
-                        Some(108) => {
-                            debug!("Consumer control ESHUTDOWN, closing for recovery");
-                            *dev = None;
-                            self.record_error(
-                                format!("Failed to write consumer report: {}", e),
-                                "eshutdown",
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write consumer report",
-                            ))
-                        }
-                        Some(11) => {
-                            // EAGAIN after poll - silently drop
-                            Ok(())
-                        }
-                        _ => {
-                            warn!("Consumer control write error: {}", e);
-                            self.record_error(
-                                format!("Failed to write consumer report: {}", e),
-                                Self::io_error_code(&e),
-                            );
-                            Err(Self::io_error_to_hid_error(
-                                e,
-                                "Failed to write consumer report",
-                            ))
-                        }
-                    }
-                }
-            }
+        let plain = [(usage & 0xFF) as u8, (usage >> 8) as u8];
+        let release_plain = [0u8, 0u8];
+        let mut composite = [0u8; 9];
+        let mut composite_release = [0u8; 9];
+        let (data, release) = if self.composite_hid {
+            composite[0] = 4;
+            composite[1..3].copy_from_slice(&plain);
+            composite_release[0] = 4;
+            (composite.as_slice(), composite_release.as_slice())
         } else {
-            Err(AppError::HidError {
-                backend: "otg".to_string(),
-                reason: "Consumer control device not opened".to_string(),
-                error_code: "not_opened".to_string(),
-            })
+            (plain.as_slice(), release_plain.as_slice())
+        };
+
+        if self.write_report_to_device(
+            DeviceType::ConsumerControl,
+            data,
+            "Failed to write consumer report",
+        )? {
+            trace!("Sent consumer report: {:02X?}", data);
+            let _ = self.write_report_to_device(
+                DeviceType::ConsumerControl,
+                release,
+                "Failed to release consumer report",
+            );
         }
+
+        Ok(())
     }
 
     /// Send consumer control event
@@ -1030,37 +935,41 @@ impl HidBackend for OtgBackend {
             }
         }
 
-        // Open relative mouse device
-        if let Some(ref path) = self.mouse_rel_path {
-            if path.exists() {
-                let file = Self::open_device(path)?;
-                *self.mouse_rel_dev.lock() = Some(file);
-                info!("Relative mouse device opened: {}", path.display());
-            } else {
-                warn!("Relative mouse device not found: {}", path.display());
+        if !self.composite_hid {
+            // Open relative mouse device
+            if let Some(ref path) = self.mouse_rel_path {
+                if path.exists() {
+                    let file = Self::open_device(path)?;
+                    *self.mouse_rel_dev.lock() = Some(file);
+                    info!("Relative mouse device opened: {}", path.display());
+                } else {
+                    warn!("Relative mouse device not found: {}", path.display());
+                }
             }
-        }
 
-        // Open absolute mouse device
-        if let Some(ref path) = self.mouse_abs_path {
-            if path.exists() {
-                let file = Self::open_device(path)?;
-                *self.mouse_abs_dev.lock() = Some(file);
-                info!("Absolute mouse device opened: {}", path.display());
-            } else {
-                warn!("Absolute mouse device not found: {}", path.display());
+            // Open absolute mouse device
+            if let Some(ref path) = self.mouse_abs_path {
+                if path.exists() {
+                    let file = Self::open_device(path)?;
+                    *self.mouse_abs_dev.lock() = Some(file);
+                    info!("Absolute mouse device opened: {}", path.display());
+                } else {
+                    warn!("Absolute mouse device not found: {}", path.display());
+                }
             }
-        }
 
-        // Open consumer control device (optional, may not exist on older setups)
-        if let Some(ref path) = self.consumer_path {
-            if path.exists() {
-                let file = Self::open_device(path)?;
-                *self.consumer_dev.lock() = Some(file);
-                info!("Consumer control device opened: {}", path.display());
-            } else {
-                debug!("Consumer control device not found: {}", path.display());
+            // Open consumer control device (optional, may not exist on older setups)
+            if let Some(ref path) = self.consumer_path {
+                if path.exists() {
+                    let file = Self::open_device(path)?;
+                    *self.consumer_dev.lock() = Some(file);
+                    info!("Consumer control device opened: {}", path.display());
+                } else {
+                    debug!("Consumer control device not found: {}", path.display());
+                }
             }
+        } else {
+            info!("Composite OTG HID device opened for keyboard and pointer reports");
         }
 
         // Mark as online if all devices opened successfully

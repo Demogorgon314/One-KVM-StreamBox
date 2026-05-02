@@ -126,7 +126,7 @@ fn resolve_capture_params(
     hdr_mode: crate::config::HdrMode,
     signal_info: &VfmcapSignalInfo,
 ) -> (VfmcapColorMode, VfmcapOutputFmt) {
-    let is_hdr = signal_info.hdr_status != 0 || signal_info.bitdepth >= 10;
+    let is_hdr = signal_info.hdr_status != 0;
     match hdr_mode {
         crate::config::HdrMode::Auto => {
             if is_hdr {

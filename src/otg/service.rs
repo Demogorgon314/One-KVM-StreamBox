@@ -22,6 +22,7 @@ pub struct HidDevicePaths {
     pub consumer: Option<PathBuf>,
     pub udc: Option<String>,
     pub keyboard_leds_enabled: bool,
+    pub composite_hid: bool,
 }
 
 impl HidDevicePaths {
@@ -201,6 +202,23 @@ impl OtgService {
         self.reconcile_gadget().await
     }
 
+    fn should_use_composite_hid(functions: &OtgHidFunctions) -> bool {
+        #[cfg(feature = "aml")]
+        {
+            let enabled = u8::from(functions.keyboard)
+                + u8::from(functions.mouse_relative)
+                + u8::from(functions.mouse_absolute)
+                + u8::from(functions.consumer);
+            enabled > 1
+        }
+
+        #[cfg(not(feature = "aml"))]
+        {
+            let _ = functions;
+            false
+        }
+    }
+
     async fn reconcile_gadget(&self) -> Result<()> {
         let desired = self.desired.read().await.clone();
 
@@ -292,62 +310,6 @@ impl OtgService {
             desired.descriptor.clone(),
         );
 
-        let mut hid_paths = None;
-        if let Some(hid_functions) = desired.hid_functions.clone() {
-            let mut paths = HidDevicePaths {
-                udc: Some(udc.clone()),
-                keyboard_leds_enabled: desired.keyboard_leds,
-                ..Default::default()
-            };
-
-            if hid_functions.keyboard {
-                match manager.add_keyboard(desired.keyboard_leds) {
-                    Ok(kb) => paths.keyboard = Some(kb),
-                    Err(e) => {
-                        let error = format!("Failed to add keyboard HID function: {}", e);
-                        self.state.write().await.error = Some(error.clone());
-                        return Err(AppError::Internal(error));
-                    }
-                }
-            }
-
-            if hid_functions.mouse_relative {
-                match manager.add_mouse_relative() {
-                    Ok(rel) => paths.mouse_relative = Some(rel),
-                    Err(e) => {
-                        let error = format!("Failed to add relative mouse HID function: {}", e);
-                        self.state.write().await.error = Some(error.clone());
-                        return Err(AppError::Internal(error));
-                    }
-                }
-            }
-
-            if hid_functions.mouse_absolute {
-                match manager.add_mouse_absolute() {
-                    Ok(abs) => paths.mouse_absolute = Some(abs),
-                    Err(e) => {
-                        let error = format!("Failed to add absolute mouse HID function: {}", e);
-                        self.state.write().await.error = Some(error.clone());
-                        return Err(AppError::Internal(error));
-                    }
-                }
-            }
-
-            if hid_functions.consumer {
-                match manager.add_consumer_control() {
-                    Ok(consumer) => paths.consumer = Some(consumer),
-                    Err(e) => {
-                        let error = format!("Failed to add consumer HID function: {}", e);
-                        self.state.write().await.error = Some(error.clone());
-                        return Err(AppError::Internal(error));
-                    }
-                }
-            }
-
-            hid_paths = Some(paths);
-            debug!("HID functions added to gadget");
-        }
-
         let msd_func = if desired.msd_enabled {
             match manager.add_msd() {
                 Ok(func) => {
@@ -363,6 +325,88 @@ impl OtgService {
         } else {
             None
         };
+
+        let mut hid_paths = None;
+        if let Some(hid_functions) = desired.hid_functions.clone() {
+            let use_composite_hid = Self::should_use_composite_hid(&hid_functions);
+            let mut paths = HidDevicePaths {
+                udc: Some(udc.clone()),
+                keyboard_leds_enabled: desired.keyboard_leds && !use_composite_hid,
+                composite_hid: use_composite_hid,
+                ..Default::default()
+            };
+
+            if use_composite_hid {
+                match manager.add_composite_keyboard_pointer() {
+                    Ok(path) => {
+                        // The composite /dev/hidg node is also the backing file for
+                        // pointer reports, so keep it available as the keyboard path.
+                        paths.keyboard = Some(path.clone());
+                        if hid_functions.mouse_relative {
+                            paths.mouse_relative = Some(path.clone());
+                        }
+                        if hid_functions.mouse_absolute {
+                            paths.mouse_absolute = Some(path.clone());
+                        }
+                        if hid_functions.consumer {
+                            paths.consumer = Some(path);
+                        }
+                    }
+                    Err(e) => {
+                        let error = format!("Failed to add composite HID function: {}", e);
+                        self.state.write().await.error = Some(error.clone());
+                        return Err(AppError::Internal(error));
+                    }
+                }
+            } else {
+                if hid_functions.keyboard {
+                    match manager.add_keyboard(desired.keyboard_leds) {
+                        Ok(kb) => paths.keyboard = Some(kb),
+                        Err(e) => {
+                            let error = format!("Failed to add keyboard HID function: {}", e);
+                            self.state.write().await.error = Some(error.clone());
+                            return Err(AppError::Internal(error));
+                        }
+                    }
+                }
+
+                if hid_functions.mouse_relative {
+                    match manager.add_mouse_relative() {
+                        Ok(rel) => paths.mouse_relative = Some(rel),
+                        Err(e) => {
+                            let error = format!("Failed to add relative mouse HID function: {}", e);
+                            self.state.write().await.error = Some(error.clone());
+                            return Err(AppError::Internal(error));
+                        }
+                    }
+                }
+
+                if hid_functions.mouse_absolute {
+                    match manager.add_mouse_absolute() {
+                        Ok(abs) => paths.mouse_absolute = Some(abs),
+                        Err(e) => {
+                            let error = format!("Failed to add absolute mouse HID function: {}", e);
+                            self.state.write().await.error = Some(error.clone());
+                            return Err(AppError::Internal(error));
+                        }
+                    }
+                }
+
+                if hid_functions.consumer {
+                    match manager.add_consumer_control() {
+                        Ok(consumer) => paths.consumer = Some(consumer),
+                        Err(e) => {
+                            let error = format!("Failed to add consumer HID function: {}", e);
+                            self.state.write().await.error = Some(error.clone());
+                            return Err(AppError::Internal(error));
+                        }
+                    }
+                }
+            }
+
+            hid_paths = Some(paths);
+            debug!("HID functions added to gadget");
+        }
 
         if let Err(e) = manager.setup() {
             let error = format!("Failed to setup gadget: {}", e);

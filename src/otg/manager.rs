@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
 use super::configfs::{
     create_dir, create_symlink, find_udc, is_configfs_available, remove_dir, remove_file,
-    write_file, CONFIGFS_PATH, DEFAULT_GADGET_NAME, DEFAULT_USB_BCD_DEVICE, DEFAULT_USB_PRODUCT_ID,
-    DEFAULT_USB_VENDOR_ID, USB_BCD_USB,
+    unbind_other_gadgets_using_udc, write_file, CONFIGFS_PATH, DEFAULT_GADGET_NAME,
+    DEFAULT_USB_BCD_DEVICE, DEFAULT_USB_PRODUCT_ID, DEFAULT_USB_VENDOR_ID, USB_BCD_USB,
 };
 use super::endpoint::{EndpointAllocator, DEFAULT_MAX_ENDPOINTS};
 use super::function::{FunctionMeta, GadgetFunction};
@@ -166,6 +166,15 @@ impl OtgGadgetManager {
         Ok(device_path)
     }
 
+    /// Add composite HID function (keyboard + pointers + consumer control)
+    pub fn add_composite_keyboard_pointer(&mut self) -> Result<PathBuf> {
+        let func = HidFunction::composite_keyboard_pointer(self.hid_instance);
+        let device_path = func.device_path();
+        self.add_function(Box::new(func))?;
+        self.hid_instance += 1;
+        Ok(device_path)
+    }
+
     /// Add MSD function (returns MsdFunction handle for LUN configuration)
     pub fn add_msd(&mut self) -> Result<MsdFunction> {
         let func = MsdFunction::new(self.msd_instance);
@@ -252,6 +261,13 @@ impl OtgGadgetManager {
             warn!("Failed to recreate gadget config links before bind: {}", e);
         }
 
+        for gadget in unbind_other_gadgets_using_udc(udc, &self.gadget_name)? {
+            warn!(
+                "Unbound existing USB gadget {} from UDC {} before One-KVM bind",
+                gadget, udc
+            );
+        }
+
         info!("Binding gadget to UDC: {}", udc);
         write_file(&self.gadget_path.join("UDC"), &udc)?;
         self.bound_udc = Some(udc.to_string());
@@ -282,20 +298,7 @@ impl OtgGadgetManager {
         // Unbind from UDC first
         let _ = self.unbind();
 
-        // Unlink and cleanup functions
-        for func in self.functions.iter().rev() {
-            let _ = func.unlink(&self.config_path);
-        }
-
-        // Remove config strings
-        let config_strings = self.config_path.join("strings/0x409");
-        let _ = remove_dir(&config_strings);
-        let _ = remove_dir(&self.config_path);
-
-        // Cleanup functions
-        for func in self.functions.iter().rev() {
-            let _ = func.cleanup(&self.gadget_path);
-        }
+        self.cleanup_existing_configfs_tree();
 
         // Remove gadget strings
         let gadget_strings = self.gadget_path.join("strings/0x409");
@@ -308,6 +311,44 @@ impl OtgGadgetManager {
 
         self.created_by_us = false;
         info!("OTG USB Gadget cleanup complete");
+        Ok(())
+    }
+
+    fn cleanup_existing_configfs_tree(&self) {
+        let _ = Self::remove_configfs_children(&self.config_path);
+        let _ = remove_dir(&self.config_path);
+
+        let functions_path = self.gadget_path.join("functions");
+        let _ = Self::remove_configfs_children(&functions_path);
+    }
+
+    fn remove_configfs_children(path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let entries = fs::read_dir(path).map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to read directory {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        for entry in entries.flatten() {
+            let child = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+
+            if file_type.is_symlink() {
+                let _ = fs::remove_file(&child);
+            } else if file_type.is_dir() {
+                let _ = Self::remove_configfs_children(&child);
+                let _ = remove_dir(&child);
+            }
+        }
+
         Ok(())
     }
 
@@ -390,31 +431,21 @@ impl OtgGadgetManager {
 
     /// Recreate config symlinks from functions directory
     fn recreate_config_links(&self) -> Result<()> {
-        let functions_path = self.gadget_path.join("functions");
-        if !functions_path.exists() || !self.config_path.exists() {
+        if !self.config_path.exists() {
             return Ok(());
         }
 
-        let entries = std::fs::read_dir(&functions_path).map_err(|e| {
-            AppError::Internal(format!(
-                "Failed to read functions directory {}: {}",
-                functions_path.display(),
-                e
-            ))
-        })?;
+        for func in &self.functions {
+            let src = self.gadget_path.join("functions").join(func.name());
+            let dest = self.config_path.join(func.name());
 
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = match name.to_str() {
-                Some(n) => n,
-                None => continue,
-            };
-            if !name.contains(".usb") && !name.starts_with("hid.") {
+            if !src.exists() {
+                warn!(
+                    "Skipping missing gadget function {} while recreating config links",
+                    src.display()
+                );
                 continue;
             }
-
-            let src = functions_path.join(name);
-            let dest = self.config_path.join(name);
 
             if dest.exists() {
                 if let Err(e) = remove_file(&dest) {

@@ -278,19 +278,19 @@ impl OtgHidFunctions {
         !self.keyboard && !self.mouse_relative && !self.mouse_absolute && !self.consumer
     }
 
-    pub fn endpoint_cost(&self, _keyboard_leds: bool) -> u8 {
+    pub fn endpoint_cost(&self, keyboard_leds: bool) -> u8 {
         let mut endpoints = 0;
         if self.keyboard {
-            endpoints += 2;
+            endpoints += if keyboard_leds { 2 } else { 1 };
         }
         if self.mouse_relative {
-            endpoints += 2;
+            endpoints += 1;
         }
         if self.mouse_absolute {
-            endpoints += 2;
+            endpoints += 1;
         }
         if self.consumer {
-            endpoints += 2;
+            endpoints += 1;
         }
         endpoints
     }
