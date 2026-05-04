@@ -734,6 +734,21 @@ pub async fn setup_init(
         tracing::warn!("Failed to apply OTG config during setup: {}", e);
     }
 
+    if new_config.msd.enabled {
+        let msd = crate::msd::MsdController::new(
+            state.otg_service.clone(),
+            new_config.msd.msd_dir_path(),
+        );
+
+        if let Err(e) = msd.init().await {
+            tracing::warn!("Failed to initialize MSD controller during setup: {}", e);
+        } else {
+            msd.set_event_bus(state.events.clone()).await;
+            *state.msd.write().await = Some(msd);
+            tracing::info!("MSD controller initialized during setup");
+        }
+    }
+
     tracing::info!(
         "Extension config after save: ttyd.enabled={}, rustdesk.enabled={}",
         new_config.extensions.ttyd.enabled,
