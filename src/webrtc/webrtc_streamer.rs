@@ -538,7 +538,12 @@ impl WebRtcStreamer {
     /// Reconnect audio source for all existing sessions
     /// Call this after audio controller restarts (e.g., quality change)
     pub async fn reconnect_audio_sources(&self) {
+        if !*self.audio_enabled.read().await {
+            return;
+        }
+
         if let Some(ref controller) = *self.audio_controller.read().await {
+            let mut sessions_needing_renegotiation = Vec::new();
             let sessions = self.sessions.read().await;
             for (session_id, session) in sessions.iter() {
                 if session.has_audio() {
@@ -546,6 +551,22 @@ impl WebRtcStreamer {
                     if let Some(rx) = controller.subscribe_opus_async().await {
                         session.start_audio_from_opus(rx).await;
                     }
+                } else {
+                    sessions_needing_renegotiation.push(session_id.clone());
+                }
+            }
+            drop(sessions);
+
+            for session_id in sessions_needing_renegotiation {
+                info!(
+                    "Closing WebRTC session {} to renegotiate Opus audio track",
+                    session_id
+                );
+                if let Err(e) = self.close_session(&session_id).await {
+                    warn!(
+                        "Failed to close WebRTC session {} for audio renegotiation: {}",
+                        session_id, e
+                    );
                 }
             }
         }

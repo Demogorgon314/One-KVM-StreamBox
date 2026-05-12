@@ -3569,8 +3569,8 @@ pub async fn start_audio_streaming(
 ) -> Result<Json<LoginResponse>> {
     state.audio.start_streaming().await?;
 
-    // Reconnect audio sources for existing WebRTC sessions
-    // This ensures sessions created before audio was enabled will receive audio
+    // Reconnect audio sources for WebRTC sessions; sessions created without an
+    // audio track are closed so the client renegotiates with Opus enabled.
     state.stream_manager.reconnect_webrtc_audio_sources().await;
 
     Ok(Json(LoginResponse {

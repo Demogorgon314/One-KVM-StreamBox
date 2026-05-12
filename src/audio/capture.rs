@@ -1,6 +1,6 @@
 //! ALSA audio capture implementation
 
-use alsa::pcm::{Access, Format, Frames, HwParams, State, IO};
+use alsa::pcm::{Access, Format, Frames, HwParams, State};
 use alsa::{Direction, ValueOr, PCM};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -281,16 +281,34 @@ fn run_capture(
             .map_err(|e| AppError::AudioError(format!("Failed to apply hw params: {}", e)))?;
     }
 
-    // Get actual configuration
-    let actual_rate = pcm
-        .hw_params_current()
-        .map(|h| h.get_rate().unwrap_or(config.sample_rate))
+    // Get actual configuration. Some Amlogic routes accept the requested params
+    // but expose a different channel layout, so all buffer math below uses these.
+    let current_hw_params = pcm.hw_params_current().ok();
+    let actual_rate = current_hw_params
+        .as_ref()
+        .and_then(|h| h.get_rate().ok())
         .unwrap_or(config.sample_rate);
+    let actual_channels = current_hw_params
+        .as_ref()
+        .and_then(|h| h.get_channels().ok())
+        .unwrap_or(config.channels)
+        .max(1);
+    let actual_format = current_hw_params
+        .as_ref()
+        .and_then(|h| h.get_format().ok())
+        .unwrap_or_else(Format::s16);
 
-    if actual_rate != config.sample_rate {
+    if actual_format != Format::s16() {
+        return Err(AppError::AudioError(format!(
+            "Audio device configured unexpected format: {:?}",
+            actual_format
+        )));
+    }
+
+    if actual_rate != config.sample_rate || actual_channels != config.channels {
         info!(
-            "ALSA sample rate differs from requested ({}Hz vs {}Hz); streamer will resample to 48000Hz for Opus",
-            actual_rate, config.sample_rate
+            "ALSA capture params differ from requested ({}Hz {}ch vs {}Hz {}ch); streamer will convert to 48000Hz stereo for Opus",
+            actual_rate, actual_channels, config.sample_rate, config.channels
         );
     } else {
         info!(
@@ -314,8 +332,7 @@ fn run_capture(
         .unwrap_or(1024)
         .max(256);
     let buf_frames = period_frames.saturating_mul(4).max(2048);
-    let bytes_per_frame = (config.channels as usize) * 2;
-    let mut buffer = vec![0u8; buf_frames * bytes_per_frame];
+    let mut buffer = vec![0i16; buf_frames * actual_channels as usize];
 
     // Capture loop
     while !stop_flag.load(Ordering::Relaxed) {
@@ -338,10 +355,19 @@ fn run_capture(
             _ => {}
         }
 
-        // Get IO handle and read audio data directly as bytes
-        // Note: Use io() instead of io_checked() because USB audio devices
-        // typically don't support mmap, which io_checked() requires
-        let io: IO<u8> = pcm.io_bytes();
+        let io = match pcm.io_i16() {
+            Ok(io) => io,
+            Err(e) => {
+                error_throttled!(
+                    log_throttler,
+                    "io_format",
+                    "Audio device format changed unexpectedly: {}",
+                    e
+                );
+                let _ = state.send(CaptureState::Error);
+                break;
+            }
+        };
 
         match io.readi(&mut buffer) {
             Ok(frames_read) => {
@@ -349,14 +375,12 @@ fn run_capture(
                     continue;
                 }
 
-                // Calculate actual byte count
-                let byte_count = frames_read * config.channels as usize * 2;
+                let sample_count = frames_read * actual_channels as usize;
 
-                // Directly use the buffer slice (already in correct byte format)
                 let seq = sequence.fetch_add(1, Ordering::Relaxed);
                 let frame = AudioFrame::new_interleaved(
-                    Bytes::copy_from_slice(&buffer[..byte_count]),
-                    config.channels,
+                    Bytes::copy_from_slice(bytemuck::cast_slice(&buffer[..sample_count])),
+                    actual_channels,
                     actual_rate,
                     seq,
                 );

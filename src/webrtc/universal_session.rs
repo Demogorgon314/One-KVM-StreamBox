@@ -828,6 +828,11 @@ impl UniversalSession {
 
         info!("Starting audio receiver for session {}", self.session_id);
 
+        let mut audio_receiver_handle = self.audio_receiver_handle.lock().await;
+        if let Some(handle) = audio_receiver_handle.take() {
+            handle.abort();
+        }
+
         let mut state_rx = self.state_rx.clone();
         let session_id = self.session_id.clone();
 
@@ -902,7 +907,7 @@ impl UniversalSession {
             );
         });
 
-        *self.audio_receiver_handle.lock().await = Some(handle);
+        *audio_receiver_handle = Some(handle);
     }
 
     /// Check if audio is enabled for this session
