@@ -196,11 +196,18 @@ impl WebRtcStreamer {
         // Close all existing sessions
         self.close_all_sessions().await;
 
-        // Stop current pipeline
-        if let Some(ref pipeline) = *self.video_pipeline.read().await {
-            pipeline.stop();
+        let old_pipeline = {
+            let mut guard = self.video_pipeline.write().await;
+            guard.take()
+        };
+
+        if let Some(pipeline) = old_pipeline {
+            // AML vfmcap is fragile if a new encoder starts while the previous
+            // capture/encode thread is still releasing DMA/Vulkan resources.
+            pipeline
+                .stop_and_wait(std::time::Duration::from_secs(10))
+                .await;
         }
-        *self.video_pipeline.write().await = None;
 
         // Update codec
         *self.video_codec.write().await = codec;

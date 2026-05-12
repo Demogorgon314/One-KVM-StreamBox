@@ -15,8 +15,8 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -87,6 +87,60 @@ fn h264_contains_parameter_sets(data: &[u8]) -> bool {
         let nal_type = data[pos] & 0x1F;
         if nal_type == 7 || nal_type == 8 {
             return true;
+        }
+        pos += nalu_len;
+    }
+
+    false
+}
+
+fn h265_contains_parameter_sets(data: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 4 <= data.len() {
+        let sc_len = if i + 4 <= data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
+            4
+        } else if i + 3 <= data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            3
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let nal_start = i + sc_len;
+        if nal_start + 1 < data.len() {
+            let nal_type = (data[nal_start] >> 1) & 0x3F;
+            if (32..=34).contains(&nal_type) {
+                return true;
+            }
+        }
+        i = nal_start.saturating_add(1);
+    }
+
+    if data.len() >= 2 {
+        let nal_type = (data[0] >> 1) & 0x3F;
+        if (32..=34).contains(&nal_type) {
+            return true;
+        }
+    }
+
+    let mut pos = 0usize;
+    while pos + 4 <= data.len() {
+        let nalu_len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+        if nalu_len == 0 || pos + nalu_len > data.len() {
+            break;
+        }
+        if pos + 1 < data.len() {
+            let nal_type = (data[pos] >> 1) & 0x3F;
+            if (32..=34).contains(&nal_type) {
+                return true;
+            }
         }
         pos += nalu_len;
     }
@@ -703,11 +757,18 @@ impl UniversalSession {
                                     waiting_for_keyframe = true;
                                 }
 
-                                // Some H264 encoders output SPS/PPS in a separate non-keyframe AU
+                                // Some encoders output parameter sets in a separate non-keyframe AU
                                 // before IDR. Keep this frame so browser can decode the next IDR.
-                                let forward_h264_parameter_frame = waiting_for_keyframe
-                                    && expected_codec == VideoEncoderType::H264
-                                    && h264_contains_parameter_sets(encoded_frame.data.as_ref());
+                                let forward_parameter_frame = waiting_for_keyframe
+                                    && match expected_codec {
+                                        VideoEncoderType::H264 => {
+                                            h264_contains_parameter_sets(encoded_frame.data.as_ref())
+                                        }
+                                        VideoEncoderType::H265 => {
+                                            h265_contains_parameter_sets(encoded_frame.data.as_ref())
+                                        }
+                                        _ => false,
+                                    };
 
                                 let now = Instant::now();
                                 if now.duration_since(last_keyframe_request)
@@ -716,7 +777,7 @@ impl UniversalSession {
                                     request_keyframe();
                                     last_keyframe_request = now;
                                 }
-                                if !forward_h264_parameter_frame {
+                                if !forward_parameter_frame {
                                     continue;
                                 }
                             }

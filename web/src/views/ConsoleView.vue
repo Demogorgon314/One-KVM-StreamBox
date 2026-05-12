@@ -1525,6 +1525,29 @@ async function switchToWebRTC(codec: VideoMode = 'h264') {
   }
 }
 
+async function switchWebRTCCodecWithReload(codec: VideoMode) {
+  videoLoading.value = true
+  videoRestarting.value = true
+  videoError.value = false
+  videoErrorMessage.value = ''
+  pendingWebRTCReadyGate = false
+
+  try {
+    if (webrtc.isConnected.value || webrtc.isConnecting.value || webrtc.sessionId.value) {
+      await webrtc.disconnect()
+    }
+
+    await streamApi.setMode(codec)
+
+    // Codec-only switches rebuild the AML encoder. A full page reload avoids
+    // reusing stale WebRTC/ICE state and matches the known-good manual refresh path.
+    setTimeout(() => reloadPage(), 100)
+  } catch {
+    videoRestarting.value = false
+    markWebRTCFailure(t('console.webrtcFailed'))
+  }
+}
+
 async function switchToMJPEG() {
   videoLoading.value = true
   videoError.value = false
@@ -1588,6 +1611,8 @@ async function handleVideoModeChange(mode: VideoMode) {
   }
 
   try {
+    const previousMode = videoMode.value
+
     await captureFrameOverlay()
 
     // Reset mjpegTimestamp to 0 when switching away from MJPEG
@@ -1607,7 +1632,9 @@ async function handleVideoModeChange(mode: VideoMode) {
     localStorage.setItem('videoMode', mode)
 
     // All WebRTC modes: h264, h265, vp8, vp9
-    if (mode !== 'mjpeg') {
+    if ((previousMode === 'h264' || previousMode === 'h265') && (mode === 'h264' || mode === 'h265')) {
+      await switchWebRTCCodecWithReload(mode)
+    } else if (mode !== 'mjpeg') {
       await switchToWebRTC(mode)
     } else {
       await switchToMJPEG()

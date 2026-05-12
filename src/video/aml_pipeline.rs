@@ -319,6 +319,7 @@ pub struct AmlPipeline {
     sequence: AtomicU64,
     pipeline_start_time_ms: AtomicI64,
     keyframe_requested: AtomicBool,
+    codec_header: ParkingRwLock<Option<Arc<EncodedVideoFrame>>>,
     latest_subscribers:
         Arc<ParkingRwLock<Vec<tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>>>>,
     stats: Arc<tokio::sync::Mutex<PipelineStats>>,
@@ -344,6 +345,7 @@ impl AmlPipeline {
             sequence: AtomicU64::new(0),
             pipeline_start_time_ms: AtomicI64::new(0),
             keyframe_requested: AtomicBool::new(false),
+            codec_header: ParkingRwLock::new(None),
             latest_subscribers: Arc::new(ParkingRwLock::new(Vec::new())),
             stats: Arc::new(tokio::sync::Mutex::new(PipelineStats::default())),
         }
@@ -366,6 +368,11 @@ impl AmlPipeline {
     }
 
     pub fn add_subscriber(&self, tx: tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>) {
+        if let Some(header) = self.codec_header.read().clone() {
+            if tx.send(header).is_err() {
+                return;
+            }
+        }
         self.latest_subscribers.write().push(tx);
     }
 
@@ -561,14 +568,16 @@ impl AmlPipeline {
                     let header_frame = Arc::new(EncodedVideoFrame {
                         data: Bytes::from(header),
                         pts_ms: 0,
-                        is_keyframe: true,
+                        is_keyframe: false,
                         sequence: 0,
                         duration: Duration::from_millis(0),
                         codec: config.output_codec,
                     });
+                    *self.codec_header.write() = Some(header_frame.clone());
                     self.broadcast_encoded(header_frame);
                 }
                 Err(e) => {
+                    *self.codec_header.write() = None;
                     warn!("Failed to generate encoder header: {}", e);
                 }
             }
