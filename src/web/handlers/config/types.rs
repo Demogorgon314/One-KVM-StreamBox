@@ -697,7 +697,7 @@ impl AudioConfigUpdate {
             config.enabled = enabled;
         }
         if let Some(ref device) = self.device {
-            config.device = device.clone();
+            config.device = crate::audio::normalize_audio_device_selection(device);
         }
         if let Some(ref quality) = self.quality {
             config.quality = quality.clone();

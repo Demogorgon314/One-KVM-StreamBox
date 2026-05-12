@@ -546,7 +546,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            device: "default".to_string(),
+            device: "hdmi".to_string(),
             quality: "balanced".to_string(),
         }
     }

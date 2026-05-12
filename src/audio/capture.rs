@@ -60,7 +60,7 @@ impl AudioConfig {
         };
 
         Self {
-            device_name: device.name.clone(),
+            device_name: device.alsa_name(),
             sample_rate,
             channels,
             frame_size: sample_rate / 50, // 20ms

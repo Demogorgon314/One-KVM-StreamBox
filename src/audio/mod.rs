@@ -18,7 +18,10 @@ pub mod streamer;
 
 pub use capture::{AudioCapturer, AudioConfig, AudioFrame};
 pub use controller::{AudioController, AudioControllerConfig, AudioQuality, AudioStatus};
-pub use device::{enumerate_audio_devices, enumerate_audio_devices_with_current, AudioDeviceInfo};
+pub use device::{
+    enumerate_audio_devices, enumerate_audio_devices_with_current,
+    normalize_audio_device_selection, resolve_audio_device_name, AudioDeviceInfo,
+};
 pub use encoder::{OpusConfig, OpusEncoder, OpusFrame};
 pub use monitor::{AudioHealthMonitor, AudioHealthStatus, AudioMonitorConfig};
 pub use streamer::{AudioStreamState, AudioStreamer, AudioStreamerConfig};

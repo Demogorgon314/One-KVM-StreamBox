@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use super::capture::{AudioCapturer, AudioConfig, AudioFrame, CaptureState};
+use super::device::resolve_audio_device_name;
 use super::encoder::{OpusConfig, OpusEncoder, OpusFrame};
 use super::resample::Opus48kPcmBuffer;
 use crate::error::{AppError, Result};
@@ -44,7 +45,7 @@ impl AudioStreamerConfig {
     pub fn for_device(device_name: &str) -> Self {
         Self {
             capture: AudioConfig {
-                device_name: device_name.to_string(),
+                device_name: resolve_audio_device_name(device_name),
                 ..Default::default()
             },
             opus: OpusConfig::default(),

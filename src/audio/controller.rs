@@ -8,7 +8,10 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use super::capture::AudioConfig;
-use super::device::{enumerate_audio_devices_with_current, AudioDeviceInfo};
+use super::device::{
+    enumerate_audio_devices_with_current, normalize_audio_device_selection,
+    resolve_audio_device_name, AudioDeviceInfo,
+};
 use super::encoder::{OpusConfig, OpusFrame};
 use super::monitor::{AudioHealthMonitor, AudioHealthStatus};
 use super::streamer::{AudioStreamer, AudioStreamerConfig};
@@ -86,7 +89,7 @@ impl Default for AudioControllerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            device: "default".to_string(),
+            device: "hdmi".to_string(),
             quality: AudioQuality::Balanced,
         }
     }
@@ -186,13 +189,15 @@ impl AudioController {
 
     /// Select audio device
     pub async fn select_device(&self, device: &str) -> Result<()> {
+        let selected_device = normalize_audio_device_selection(device);
+
         // Validate device exists
         let devices = self.list_devices().await?;
-        let found = devices
-            .iter()
-            .any(|d| d.name == device || d.description.contains(device));
+        let found = devices.iter().any(|d| {
+            d.name == selected_device || d.alsa_name() == resolve_audio_device_name(device)
+        });
 
-        if !found && device != "default" {
+        if !found {
             return Err(AppError::AudioError(format!(
                 "Audio device not found: {}",
                 device
@@ -202,10 +207,10 @@ impl AudioController {
         // Update config
         {
             let mut config = self.config.write().await;
-            config.device = device.to_string();
+            config.device = selected_device.clone();
         }
 
-        info!("Audio device selected: {}", device);
+        info!("Audio device selected: {}", selected_device);
 
         // If streaming, restart with new device
         if self.is_streaming().await {
@@ -250,7 +255,12 @@ impl AudioController {
             return Ok(());
         }
 
-        info!("Starting audio streaming with device: {}", config.device);
+        let capture_device = resolve_audio_device_name(&config.device);
+
+        info!(
+            "Starting audio streaming with device: {} ({})",
+            config.device, capture_device
+        );
 
         // Clear any previous error
         *self.last_error.write().await = None;
@@ -258,7 +268,7 @@ impl AudioController {
         // Create streamer config (fixed 48kHz stereo)
         let streamer_config = AudioStreamerConfig {
             capture: AudioConfig {
-                device_name: config.device.clone(),
+                device_name: capture_device,
                 ..Default::default()
             },
             opus: config.quality.to_opus_config(),
@@ -379,6 +389,11 @@ impl AudioController {
 
     /// Update full configuration
     pub async fn update_config(&self, new_config: AudioControllerConfig) -> Result<()> {
+        let device = normalize_audio_device_selection(&new_config.device);
+        let new_config = AudioControllerConfig {
+            device,
+            ..new_config
+        };
         let was_streaming = self.is_streaming().await;
 
         // Stop streaming if running (device/quality/enabled may all change)
