@@ -289,13 +289,19 @@ impl AmlVencEncoder {
 
         let is_delay = meta.encoded_data_length_in_bytes == 0;
 
+        let is_keyframe = meta.is_key_frame
+            || matches!(
+                meta.extra.frame_type,
+                x if x == VlFrameType::Idr as i32 || x == VlFrameType::I as i32
+            );
+
         Ok(AmlEncodedFrame {
             data: if is_delay {
                 Vec::new()
             } else {
                 self.out_buf[..meta.encoded_data_length_in_bytes as usize].to_vec()
             },
-            is_keyframe: meta.is_key_frame,
+            is_keyframe,
             is_delay,
             pts_us: meta.timestamp_us,
             frame_type: meta.extra.frame_type,
@@ -335,13 +341,19 @@ impl AmlVencEncoder {
 
         let is_delay = meta.encoded_data_length_in_bytes == 0;
 
+        let is_keyframe = meta.is_key_frame
+            || matches!(
+                meta.extra.frame_type,
+                x if x == VlFrameType::Idr as i32 || x == VlFrameType::I as i32
+            );
+
         Ok(AmlEncodedFrame {
             data: if is_delay {
                 Vec::new()
             } else {
                 self.out_buf[..meta.encoded_data_length_in_bytes as usize].to_vec()
             },
-            is_keyframe: meta.is_key_frame,
+            is_keyframe,
             is_delay,
             pts_us: meta.timestamp_us,
             frame_type: meta.extra.frame_type,

@@ -509,11 +509,12 @@ impl AmlPipeline {
                             codec,
                         });
 
-                        if sequence <= 5 || sequence % 60 == 0 {
+                        if sequence <= 5 || frame.is_keyframe || sequence % 60 == 0 {
                             info!(
-                                "AML pipeline: encoded frame (seq={}, key={}, size={})",
+                                "AML pipeline: encoded frame (seq={}, key={}, frame_type={:?}, size={})",
                                 sequence,
                                 frame.is_keyframe,
+                                encoded.frame_type,
                                 frame.data.len()
                             );
                         }
