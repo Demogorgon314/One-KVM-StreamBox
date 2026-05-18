@@ -563,28 +563,39 @@ impl WebRtcStreamer {
                             streamer.sync_video_geometry_from_negotiated(r, f).await;
                         }
                         if should_reconnect {
-                            let streamer_for_reconnect = streamer.clone();
-                            tokio::task::spawn_blocking(move || {
-                                let handle = tokio::runtime::Handle::current();
-                                handle.block_on(async move {
-                                    match streamer_for_reconnect
-                                        .reconnect_sessions_to_current_pipeline(
-                                            "capture geometry change",
-                                        )
-                                        .await
-                                    {
-                                        Ok(reconnected) if reconnected > 0 => info!(
-                                            "Video pipeline rebuilt after geometry change, reconnected {} sessions",
-                                            reconnected
-                                        ),
-                                        Ok(_) => {}
-                                        Err(e) => warn!(
-                                            "Failed to reconnect sessions after geometry change: {}",
-                                            e
-                                        ),
-                                    }
-                                });
-                            });
+                            streamer
+                                .publish_stream_event(SystemEvent::StreamConfigChanging {
+                                    transition_id: None,
+                                    reason: "capture_signal_change".to_string(),
+                                })
+                                .await;
+
+                            let closed = streamer.close_all_sessions().await;
+                            info!(
+                                "Closed {} WebRTC sessions after capture signal change; clients should reconnect",
+                                closed
+                            );
+
+                            let config = streamer.config.read().await.clone();
+                            let device = streamer
+                                .capture_device
+                                .read()
+                                .await
+                                .as_ref()
+                                .map(|capture| capture.device_path.display().to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            streamer
+                                .publish_stream_event(SystemEvent::StreamConfigApplied {
+                                    transition_id: None,
+                                    device,
+                                    resolution: (
+                                        config.resolution.width,
+                                        config.resolution.height,
+                                    ),
+                                    format: config.input_format.to_string(),
+                                    fps: config.fps,
+                                })
+                                .await;
                         }
 
                         info!(
