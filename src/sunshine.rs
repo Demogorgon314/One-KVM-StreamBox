@@ -64,6 +64,9 @@ const GAMESTREAM_STARTUP_KEYFRAME_REQUESTS: u64 = 3;
 const GAMESTREAM_VIDEO_PACE_BATCH_PACKETS: usize = 24;
 const GAMESTREAM_PACKET_INPUT_DATA: u16 = 0x0206;
 const GAMESTREAM_PACKET_ENCRYPTED: u16 = 0x0001;
+const GAMESTREAM_PACKET_INVALIDATE_REF_FRAMES: u16 = 0x0301;
+const GAMESTREAM_PACKET_REQUEST_IDR_FRAME: u16 = 0x0302;
+const GAMESTREAM_PACKET_PERIODIC_PING: u16 = 0x0200;
 const GAMESTREAM_INPUT_KEY_DOWN: u32 = 0x0000_0003;
 const GAMESTREAM_INPUT_KEY_UP: u32 = 0x0000_0004;
 const GAMESTREAM_INPUT_MOUSE_ABS: u32 = 0x0000_0005;
@@ -1089,19 +1092,14 @@ async fn handle_gamestream_control_packet(
                 }
                 let packet_type = u16::from_le_bytes([plaintext[0], plaintext[1]]);
                 let payload = &plaintext[4..];
-                if packet_type == GAMESTREAM_PACKET_INPUT_DATA {
-                    handle_gamestream_input_payloads(&runtime, payload).await;
-                } else {
-                    tracing::debug!(
-                        peer = ?peer,
-                        channel_id,
-                        packet_len,
-                        seq,
-                        packet_type = format!("{packet_type:#06x}"),
-                        payload_bytes = payload.len(),
-                        "Moonlight GameStream decrypted control packet"
-                    );
-                }
+                handle_gamestream_plain_control_packet(
+                    &runtime,
+                    peer,
+                    channel_id,
+                    packet_type,
+                    payload,
+                )
+                .await;
             }
             None => {
                 tracing::warn!(
@@ -1124,6 +1122,11 @@ async fn handle_gamestream_control_packet(
         handle_gamestream_input_payloads(&runtime, &data[2..]).await;
         return;
     }
+    if let Some(packet_type) = packet_type {
+        handle_gamestream_plain_control_packet(&runtime, peer, channel_id, packet_type, &data[2..])
+            .await;
+        return;
+    }
     tracing::info!(
         peer = ?peer,
         channel_id,
@@ -1131,6 +1134,58 @@ async fn handle_gamestream_control_packet(
         bytes = data.len(),
         "Moonlight GameStream control packet"
     );
+}
+
+async fn handle_gamestream_plain_control_packet(
+    runtime: &SunshineRuntime,
+    peer: Option<SocketAddr>,
+    channel_id: u8,
+    packet_type: u16,
+    payload: &[u8],
+) {
+    match packet_type {
+        GAMESTREAM_PACKET_INPUT_DATA => {
+            handle_gamestream_input_payloads(runtime, payload).await;
+        }
+        GAMESTREAM_PACKET_REQUEST_IDR_FRAME => {
+            if let Err(e) = runtime.video_manager.request_keyframe().await {
+                tracing::warn!("Moonlight GameStream IDR request failed: {}", e);
+            } else {
+                tracing::info!(peer = ?peer, channel_id, "Moonlight GameStream requested IDR frame");
+            }
+        }
+        GAMESTREAM_PACKET_INVALIDATE_REF_FRAMES => {
+            let first_frame = payload
+                .get(0..8)
+                .map(|bytes| i64::from_le_bytes(bytes.try_into().unwrap_or_default()));
+            let last_frame = payload
+                .get(8..16)
+                .map(|bytes| i64::from_le_bytes(bytes.try_into().unwrap_or_default()));
+            if let Err(e) = runtime.video_manager.request_keyframe().await {
+                tracing::warn!("Moonlight GameStream ref-frame invalidation failed: {}", e);
+            } else {
+                tracing::info!(
+                    peer = ?peer,
+                    channel_id,
+                    first_frame,
+                    last_frame,
+                    "Moonlight GameStream invalidated refs, requested IDR frame"
+                );
+            }
+        }
+        GAMESTREAM_PACKET_PERIODIC_PING => {
+            tracing::trace!(peer = ?peer, channel_id, "Moonlight GameStream periodic ping");
+        }
+        _ => {
+            tracing::debug!(
+                peer = ?peer,
+                channel_id,
+                packet_type = format!("{packet_type:#06x}"),
+                payload_bytes = payload.len(),
+                "Moonlight GameStream control packet"
+            );
+        }
+    }
 }
 
 fn decrypt_gamestream_control_packet(runtime: &SunshineRuntime, data: &[u8]) -> Option<Vec<u8>> {
