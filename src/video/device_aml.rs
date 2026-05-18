@@ -17,6 +17,32 @@ pub struct VideoDeviceInfo {
     pub capabilities: DeviceCapabilities,
     pub is_capture_card: bool,
     pub priority: u32,
+    pub has_signal: bool,
+    pub subdev_path: Option<PathBuf>,
+    pub bridge_kind: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoDeviceRecoveryHint {
+    pub path: PathBuf,
+    pub name: String,
+    pub driver: String,
+    pub bus_info: String,
+    pub card: String,
+    pub is_capture_card: bool,
+}
+
+impl From<&VideoDeviceInfo> for VideoDeviceRecoveryHint {
+    fn from(device: &VideoDeviceInfo) -> Self {
+        Self {
+            path: device.path.clone(),
+            name: device.name.clone(),
+            driver: device.driver.clone(),
+            bus_info: device.bus_info.clone(),
+            card: device.card.clone(),
+            is_capture_card: device.is_capture_card,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +132,9 @@ fn build_aml_video_device_info(path: PathBuf) -> VideoDeviceInfo {
         },
         is_capture_card: true,
         priority: 1000,
+        has_signal: true,
+        subdev_path: None,
+        bridge_kind: None,
     }
 }
 
@@ -122,6 +151,17 @@ pub fn find_best_device() -> Result<VideoDeviceInfo> {
         .into_iter()
         .next()
         .ok_or_else(|| AppError::VideoError("No AML capture device available".to_string()))
+}
+
+pub fn select_recovery_device(
+    devices: &[VideoDeviceInfo],
+    hint: &VideoDeviceRecoveryHint,
+) -> Option<VideoDeviceInfo> {
+    devices
+        .iter()
+        .find(|device| device.path == hint.path)
+        .or_else(|| devices.iter().find(|device| device.driver == hint.driver))
+        .cloned()
 }
 
 #[cfg(test)]

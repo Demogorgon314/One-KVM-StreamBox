@@ -38,6 +38,13 @@ pub struct SharedVideoPipelineStats {
     pub current_fps: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineStateNotification {
+    pub state: &'static str,
+    pub reason: Option<&'static str>,
+    pub next_retry_ms: Option<u64>,
+}
+
 pub struct SharedVideoPipeline {
     config: RwLock<SharedVideoPipelineConfig>,
     aml_pipeline: Mutex<Option<Arc<AmlPipeline>>>,
@@ -110,11 +117,20 @@ impl SharedVideoPipeline {
         self.running_rx.clone()
     }
 
+    pub fn set_state_notifier(
+        &self,
+        _notifier: Option<Arc<dyn Fn(PipelineStateNotification) + Send + Sync>>,
+    ) {
+    }
+
     pub async fn start_with_device(
         self: &Arc<Self>,
         device_path: std::path::PathBuf,
         _buffer_count: u32,
         _jpeg_quality: u8,
+        _subdev_path: Option<std::path::PathBuf>,
+        _bridge_kind: Option<String>,
+        _v4l2_driver: Option<String>,
     ) -> Result<()> {
         if *self.running_rx.borrow() {
             return Ok(());

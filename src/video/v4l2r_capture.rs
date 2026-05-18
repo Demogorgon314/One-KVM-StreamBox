@@ -22,7 +22,7 @@ use v4l2r::nix::errno::Errno;
 use v4l2r::{Format as V4l2rFormat, PixelFormat as V4l2rPixelFormat, QueueType};
 
 use crate::error::{AppError, Result};
-use crate::video::capture_trait::{CaptureResult, CaptureStream, FrameData};
+use crate::video::capture_trait::{CaptureMeta, CaptureResult, CaptureStream, FrameData};
 use crate::video::csi_bridge::{self, CsiBridgeKind, ProbeResult};
 use crate::video::format::{PixelFormat, Resolution};
 use crate::video::SignalStatus;
@@ -34,13 +34,6 @@ pub fn is_source_changed_error(err: &io::Error) -> bool {
     err.get_ref()
         .map(|inner| inner.to_string() == SOURCE_CHANGED_MARKER)
         .unwrap_or(false)
-}
-
-/// Metadata for a captured frame.
-#[derive(Debug, Clone, Copy)]
-pub struct CaptureMeta {
-    pub bytes_used: usize,
-    pub sequence: u64,
 }
 
 /// When set, DV ioctls use the subdev (rkcif: video node has no DV ioctls).

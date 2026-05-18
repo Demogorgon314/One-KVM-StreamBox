@@ -1,7 +1,13 @@
 use std::io;
 
 use crate::video::format::{PixelFormat, Resolution};
-use crate::video::v4l2r_capture::CaptureMeta;
+
+/// Metadata for a captured frame.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureMeta {
+    pub bytes_used: usize,
+    pub sequence: u64,
+}
 
 #[derive(Debug)]
 pub struct DmaBufFrame {

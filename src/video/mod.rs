@@ -9,27 +9,39 @@ pub mod capture_trait;
 pub mod aml_pipeline;
 pub mod codec_constraints;
 pub mod convert;
-pub mod csi_bridge;
 pub mod decoder;
+#[cfg(not(feature = "aml"))]
+pub mod csi_bridge;
+#[cfg(not(feature = "aml"))]
 pub mod device;
 #[cfg(feature = "aml")]
 pub mod device_aml;
 pub mod encoder;
 pub mod format;
 pub mod frame;
+#[cfg(not(feature = "aml"))]
 pub mod shared_video_pipeline;
 #[cfg(feature = "aml")]
 pub mod shared_video_pipeline_aml;
 pub mod stream_manager;
+#[cfg(not(feature = "aml"))]
 pub mod streamer;
 #[cfg(feature = "aml")]
 pub mod streamer_aml;
 pub mod traits;
 pub mod types;
 pub mod usb_reset;
+#[cfg(not(feature = "aml"))]
 pub mod v4l2r_capture;
 #[cfg(feature = "aml")]
 pub mod vfmcap_capture;
+
+#[cfg(feature = "aml")]
+pub use device_aml as device;
+#[cfg(feature = "aml")]
+pub use shared_video_pipeline_aml as shared_video_pipeline;
+#[cfg(feature = "aml")]
+pub use streamer_aml as streamer;
 
 pub use convert::{PixelConverter, Yuv420pBuffer};
 pub use device::{VideoDevice, VideoDeviceInfo};
