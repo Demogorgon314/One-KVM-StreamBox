@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, trace, warn};
 
 use crate::error::{AppError, Result};
@@ -358,8 +358,7 @@ pub struct AmlPipeline {
     sequence: AtomicU64,
     pipeline_start_time_ms: AtomicI64,
     keyframe_requested: AtomicBool,
-    latest_subscribers:
-        Arc<ParkingRwLock<Vec<tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>>>>,
+    latest_subscribers: Arc<ParkingRwLock<Vec<mpsc::Sender<Arc<EncodedVideoFrame>>>>>,
     stats: Arc<tokio::sync::Mutex<PipelineStats>>,
 }
 
@@ -397,7 +396,7 @@ impl AmlPipeline {
         self.keyframe_requested.store(true, Ordering::Release);
     }
 
-    pub fn add_subscriber(&self, tx: tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>) {
+    pub fn add_subscriber(&self, tx: mpsc::Sender<Arc<EncodedVideoFrame>>) {
         self.latest_subscribers.write().push(tx);
     }
 
@@ -407,7 +406,11 @@ impl AmlPipeline {
 
     fn broadcast_encoded(&self, frame: Arc<EncodedVideoFrame>) {
         let mut subs = self.latest_subscribers.write();
-        subs.retain(|tx| tx.send(frame.clone()).is_ok());
+        subs.retain(|tx| match tx.try_send(frame.clone()) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => true,
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        });
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<()> {

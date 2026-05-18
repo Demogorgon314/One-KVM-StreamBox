@@ -60,7 +60,7 @@ pub struct PipelineStateNotification {
 pub struct SharedVideoPipeline {
     config: RwLock<SharedVideoPipelineConfig>,
     aml_pipeline: Mutex<Option<Arc<AmlPipeline>>>,
-    subscribers: ParkingRwLock<Vec<tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>>>,
+    subscribers: ParkingRwLock<Vec<mpsc::Sender<Arc<EncodedVideoFrame>>>>,
     running: watch::Sender<bool>,
     running_rx: watch::Receiver<bool>,
     pending_reconnect: AtomicBool,
@@ -80,27 +80,22 @@ impl SharedVideoPipeline {
     }
 
     pub fn subscribe(self: &Arc<Self>) -> mpsc::Receiver<Arc<EncodedVideoFrame>> {
-        let (tx, rx) = mpsc::channel(4);
-        let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.subscribers.write().push(bridge_tx.clone());
+        let (tx, rx) = mpsc::channel(2);
+        self.subscribers.write().push(tx.clone());
 
         if let Ok(guard) = self.aml_pipeline.try_lock() {
             if let Some(pipeline) = guard.as_ref() {
-                pipeline.add_subscriber(bridge_tx.clone());
+                pipeline.add_subscriber(tx.clone());
             }
         }
 
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
-            while let Some(frame) = bridge_rx.recv().await {
-                if tx.send(frame).await.is_err() {
-                    break;
-                }
-            }
+            tx.closed().await;
             // Bridge task exited: remove our sender from the subscribers list
             if let Some(pipeline) = weak.upgrade() {
                 let mut subs = pipeline.subscribers.write();
-                subs.retain(|s| !s.same_channel(&bridge_tx));
+                subs.retain(|s| !s.same_channel(&tx));
             }
         });
 

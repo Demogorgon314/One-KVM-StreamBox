@@ -1090,7 +1090,7 @@ async fn handle_gamestream_control_packet(
                 let packet_type = u16::from_le_bytes([plaintext[0], plaintext[1]]);
                 let payload = &plaintext[4..];
                 if packet_type == GAMESTREAM_PACKET_INPUT_DATA {
-                    handle_gamestream_input_payload(&runtime, payload).await;
+                    handle_gamestream_input_payloads(&runtime, payload).await;
                 } else {
                     tracing::debug!(
                         peer = ?peer,
@@ -1120,6 +1120,10 @@ async fn handle_gamestream_control_packet(
     let packet_type = data
         .get(0..2)
         .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]));
+    if packet_type == Some(GAMESTREAM_PACKET_INPUT_DATA) {
+        handle_gamestream_input_payloads(&runtime, &data[2..]).await;
+        return;
+    }
     tracing::info!(
         peer = ?peer,
         channel_id,
@@ -1164,28 +1168,52 @@ fn decrypt_gamestream_control_packet(runtime: &SunshineRuntime, data: &[u8]) -> 
     Some(ciphertext)
 }
 
-async fn handle_gamestream_input_payload(runtime: &SunshineRuntime, payload: &[u8]) {
+async fn handle_gamestream_input_payloads(runtime: &SunshineRuntime, mut payload: &[u8]) {
+    let mut handled = 0usize;
+    while payload.len() >= 8 {
+        let declared_size =
+            u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        let packet_len = declared_size.saturating_add(4);
+        if packet_len < 8 || packet_len > payload.len() {
+            break;
+        }
+        if handle_gamestream_input_payload(runtime, &payload[..packet_len]).await {
+            handled += 1;
+        }
+        payload = &payload[packet_len..];
+    }
+
+    if handled == 0 && !payload.is_empty() {
+        let magic = payload
+            .get(4..8)
+            .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        tracing::debug!(
+            magic = ?magic.map(|value| format!("{value:#010x}")),
+            bytes = payload.len(),
+            "Moonlight GameStream ignored input packet"
+        );
+    }
+}
+
+async fn handle_gamestream_input_payload(runtime: &SunshineRuntime, payload: &[u8]) -> bool {
     match parse_gamestream_input_event(payload) {
         Some(GameStreamInputEvent::Keyboard(event)) => {
             if let Err(e) = runtime.hid.send_keyboard(event).await {
                 tracing::warn!("Moonlight GameStream keyboard HID failed: {}", e);
+            } else {
+                tracing::trace!("Moonlight GameStream keyboard HID sent");
             }
+            true
         }
         Some(GameStreamInputEvent::Mouse(event)) => {
             if let Err(e) = runtime.hid.send_mouse(event).await {
                 tracing::warn!("Moonlight GameStream mouse HID failed: {}", e);
+            } else {
+                tracing::trace!("Moonlight GameStream mouse HID sent");
             }
+            true
         }
-        None => {
-            let magic = payload
-                .get(4..8)
-                .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-            tracing::debug!(
-                magic = ?magic.map(|value| format!("{value:#010x}")),
-                bytes = payload.len(),
-                "Moonlight GameStream ignored input packet"
-            );
-        }
+        None => false,
     }
 }
 
@@ -1674,8 +1702,8 @@ async fn build_gamestream_sdp(runtime: &SunshineRuntime) -> String {
             "s=One-KVM HDMI Input\r\n",
             "t=0 0\r\n",
             "a=x-ss-general.featureFlags:135\r\n",
-            "a=x-ss-general.encryptionSupported:0\r\n",
-            "a=x-ss-general.encryptionRequested:0\r\n",
+            "a=x-ss-general.encryptionSupported:1\r\n",
+            "a=x-ss-general.encryptionRequested:1\r\n",
             "{}",
             "a=x-nv-video[0].clientViewportWd:{}\r\n",
             "a=x-nv-video[0].clientViewportHt:{}\r\n",
