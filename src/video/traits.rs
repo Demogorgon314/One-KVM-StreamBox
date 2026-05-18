@@ -7,6 +7,7 @@ use super::types::{
     BitratePreset, PixelFormat, Resolution, SharedVideoPipeline, SharedVideoPipelineConfig,
     SharedVideoPipelineStats, VideoCodecType,
 };
+use crate::config::HdrMode;
 use crate::error::Result;
 use crate::events::EventBus;
 use crate::hid::HidController;
@@ -19,7 +20,13 @@ use crate::hid::HidController;
 #[async_trait::async_trait]
 pub trait VideoOutput: Send + Sync {
     async fn set_event_bus(&self, events: Arc<EventBus>);
-    async fn update_video_config(&self, resolution: Resolution, format: PixelFormat, fps: u32);
+    async fn update_video_config(
+        &self,
+        resolution: Resolution,
+        format: PixelFormat,
+        fps: u32,
+        hdr_mode: HdrMode,
+    );
     async fn set_capture_device(
         &self,
         device_path: PathBuf,

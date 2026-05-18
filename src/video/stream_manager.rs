@@ -31,7 +31,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::config::{ConfigStore, StreamMode};
+use crate::config::{ConfigStore, HdrMode, StreamMode};
 use crate::error::Result;
 use crate::events::{EventBus, SystemEvent, VideoDeviceInfo};
 use crate::hid::HidController;
@@ -340,12 +340,19 @@ impl VideoStreamManager {
     async fn sync_webrtc_capture_source(&self, reason: &str) {
         let (device_path, resolution, format, fps, jpeg_quality) =
             self.streamer.current_capture_config().await;
+        let hdr_mode = self
+            .config_store
+            .read()
+            .await
+            .as_ref()
+            .map(|store| store.get().video.hdr_mode)
+            .unwrap_or(HdrMode::Auto);
         info!(
-            "Syncing WebRTC capture source {}: {}x{} {:?} @ {}fps",
-            reason, resolution.width, resolution.height, format, fps
+            "Syncing WebRTC capture source {}: {}x{} {:?} @ {}fps, hdr={:?}",
+            reason, resolution.width, resolution.height, format, fps, hdr_mode
         );
         self.webrtc_streamer
-            .update_video_config(resolution, format, fps)
+            .update_video_config(resolution, format, fps, hdr_mode)
             .await;
         if let Some(device_path) = device_path {
             // Resolve the paired subdev so the WebRTC pipeline can run the
@@ -521,19 +528,20 @@ impl VideoStreamManager {
         format: PixelFormat,
         resolution: Resolution,
         fps: u32,
+        hdr_mode: HdrMode,
     ) -> Result<()> {
         let mode = self.mode.read().await.clone();
 
         info!(
-            "Applying video config: {} {:?} {}x{} @ {} fps (mode: {:?})",
-            device_path, format, resolution.width, resolution.height, fps, mode
+            "Applying video config: {} {:?} {}x{} @ {} fps, hdr={:?} (mode: {:?})",
+            device_path, format, resolution.width, resolution.height, fps, hdr_mode, mode
         );
 
         if mode == StreamMode::WebRTC {
             // Stop the shared pipeline before replacing the capture source so WebRTC
             // sessions do not stay attached to a stale frame source.
             self.webrtc_streamer
-                .update_video_config(resolution, format, fps)
+                .update_video_config(resolution, format, fps, hdr_mode)
                 .await;
             info!("WebRTC streamer config updated (pipeline stopped, sessions closed)");
         }
@@ -561,7 +569,7 @@ impl VideoStreamManager {
                     actual_resolution.width, actual_resolution.height, actual_format, actual_fps
                 );
                 self.webrtc_streamer
-                    .update_video_config(actual_resolution, actual_format, actual_fps)
+                    .update_video_config(actual_resolution, actual_format, actual_fps, hdr_mode)
                     .await;
             }
             if let Some(device_path) = device_path {

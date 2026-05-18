@@ -439,7 +439,12 @@ async fn main() -> anyhow::Result<()> {
         actual_fps
     );
     webrtc_streamer
-        .update_video_config(actual_resolution, actual_format, actual_fps)
+        .update_video_config(
+            actual_resolution,
+            actual_format,
+            actual_fps,
+            config.video.hdr_mode,
+        )
         .await;
     if let Some(device_path) = device_path {
         let (subdev_path, bridge_kind, v4l2_driver) = streamer

@@ -208,7 +208,10 @@ impl WebRtcStreamer {
         };
 
         if let Some(pipeline) = pipeline {
-            info!("Stopping video pipeline and waiting for release: {}", reason);
+            info!(
+                "Stopping video pipeline and waiting for release: {}",
+                reason
+            );
             pipeline
                 .stop_and_wait(std::time::Duration::from_secs(3))
                 .await;
@@ -761,29 +764,38 @@ impl WebRtcStreamer {
     /// Only restarts the encoding pipeline if configuration actually changed.
     /// This allows multiple consumers (WebRTC, RustDesk) to share the same pipeline
     /// without interrupting each other when they call this method with the same config.
-    pub async fn update_video_config(&self, resolution: Resolution, format: PixelFormat, fps: u32) {
+    pub async fn update_video_config(
+        &self,
+        resolution: Resolution,
+        format: PixelFormat,
+        fps: u32,
+        hdr_mode: crate::config::HdrMode,
+    ) {
         // Check if configuration actually changed
         let config = self.config.read().await;
-        let config_changed =
-            config.resolution != resolution || config.input_format != format || config.fps != fps;
+        let config_changed = config.resolution != resolution
+            || config.input_format != format
+            || config.fps != fps
+            || config.hdr_mode != hdr_mode;
         drop(config);
 
         if !config_changed {
             // Configuration unchanged, no need to restart pipeline
             trace!(
-                "Video config unchanged: {}x{} {:?} @ {} fps",
+                "Video config unchanged: {}x{} {:?} @ {} fps, hdr={:?}",
                 resolution.width,
                 resolution.height,
                 format,
-                fps
+                fps,
+                hdr_mode
             );
             return;
         }
 
         // Configuration changed, restart pipeline
         info!(
-            "Video config changed, restarting pipeline: {}x{} {:?} @ {} fps",
-            resolution.width, resolution.height, format, fps
+            "Video config changed, restarting pipeline: {}x{} {:?} @ {} fps, hdr={:?}",
+            resolution.width, resolution.height, format, fps, hdr_mode
         );
 
         // Close all existing sessions - they need to reconnect
@@ -803,11 +815,17 @@ impl WebRtcStreamer {
             config.resolution = resolution;
             config.input_format = format;
             config.fps = fps;
+            config.hdr_mode = hdr_mode;
             // Note: bitrate is NOT auto-scaled here - use set_bitrate() or config to change it
 
             info!(
-                "WebRTC config updated: {}x{} {:?} @ {} fps, {}",
-                resolution.width, resolution.height, format, fps, config.bitrate_preset
+                "WebRTC config updated: {}x{} {:?} @ {} fps, hdr={:?}, {}",
+                resolution.width,
+                resolution.height,
+                format,
+                fps,
+                config.hdr_mode,
+                config.bitrate_preset
             );
         }
 
@@ -1263,8 +1281,15 @@ impl crate::video::traits::VideoOutput for WebRtcStreamer {
         self.set_event_bus(events).await;
     }
 
-    async fn update_video_config(&self, resolution: Resolution, format: PixelFormat, fps: u32) {
-        self.update_video_config(resolution, format, fps).await;
+    async fn update_video_config(
+        &self,
+        resolution: Resolution,
+        format: PixelFormat,
+        fps: u32,
+        hdr_mode: crate::config::HdrMode,
+    ) {
+        self.update_video_config(resolution, format, fps, hdr_mode)
+            .await;
     }
 
     async fn set_capture_device(
