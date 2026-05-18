@@ -176,8 +176,7 @@ impl Drop for VfmcapStream {
 
 pub struct AmlVfmcapCaptureStream {
     inner: VfmcapStream,
-    pending_index: Option<u32>,
-    pending_frame: Option<VfmcapFrame>,
+    pending_frames: std::collections::HashMap<u32, VfmcapFrame>,
     resolution: Resolution,
     format: PixelFormat,
     num_buffers: u32,
@@ -236,8 +235,7 @@ impl AmlVfmcapCaptureStream {
 
         Ok(Self {
             inner,
-            pending_index: None,
-            pending_frame: None,
+            pending_frames: std::collections::HashMap::new(),
             resolution,
             format: PixelFormat::Nv12,
             num_buffers,
@@ -253,40 +251,24 @@ impl AmlVfmcapCaptureStream {
     }
 
     fn release_pending(&mut self) {
-        if let Some(mut frame) = self.pending_frame.take() {
+        for (_, mut frame) in self.pending_frames.drain() {
             self.inner.release_acquired_frame(&mut frame);
-        } else if let Some(idx) = self.pending_index.take() {
-            self.inner.release_frame(idx);
         }
     }
 }
 
 impl CaptureStream for AmlVfmcapCaptureStream {
     fn next_frame(&mut self) -> io::Result<CaptureResult> {
-        if self.pending_index.is_some() {
-            self.release_frame(&FrameData::DmaBuf(DmaBufFrame {
-                dmabuf_fd: -1,
-                dmabuf_fd2: -1,
-                width: 0,
-                height: 0,
-                bytesperline: 0,
-                size: 0,
-                format: 0,
-                sequence: 0,
-                timestamp_us: 0,
-            }));
-        }
-
         let timeout_ms = 2000;
         match self.inner.acquire_frame(timeout_ms) {
             Ok(AcquireResult::Frame(frame)) => {
                 let data = frame_to_data(&frame);
                 let res = Resolution::new(data.width, data.height);
                 self.resolution = res;
-                self.pending_index = Some(data.index);
-                self.pending_frame = Some(frame);
+                self.pending_frames.insert(data.index, frame);
                 Ok(CaptureResult {
                     frame: FrameData::DmaBuf(DmaBufFrame {
+                        index: data.index,
                         dmabuf_fd: data.dmabuf_fd,
                         dmabuf_fd2: data.dmabuf_fd2,
                         width: data.width,
@@ -306,10 +288,10 @@ impl CaptureStream for AmlVfmcapCaptureStream {
                 let data = frame_to_data(&frame);
                 let res = Resolution::new(data.width, data.height);
                 self.resolution = res;
-                self.pending_index = Some(data.index);
-                self.pending_frame = Some(frame);
+                self.pending_frames.insert(data.index, frame);
                 Ok(CaptureResult {
                     frame: FrameData::DmaBuf(DmaBufFrame {
+                        index: data.index,
                         dmabuf_fd: data.dmabuf_fd,
                         dmabuf_fd2: data.dmabuf_fd2,
                         width: data.width,
@@ -345,13 +327,9 @@ impl CaptureStream for AmlVfmcapCaptureStream {
 
     fn release_frame(&mut self, frame: &FrameData) {
         if let FrameData::DmaBuf(ref dma) = frame {
-            if let Some(mut native_frame) = self.pending_frame.take() {
+            if let Some(mut native_frame) = self.pending_frames.remove(&dma.index) {
                 self.inner.release_acquired_frame(&mut native_frame);
-                self.pending_index = None;
-            } else if let Some(idx) = self.pending_index.take() {
-                self.inner.release_frame(idx);
             }
-            let _ = dma;
         }
     }
 }

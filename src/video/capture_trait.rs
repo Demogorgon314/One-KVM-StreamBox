@@ -9,8 +9,9 @@ pub struct CaptureMeta {
     pub sequence: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct DmaBufFrame {
+    pub index: u32,
     pub dmabuf_fd: i32,
     pub dmabuf_fd2: i32,
     pub width: u32,

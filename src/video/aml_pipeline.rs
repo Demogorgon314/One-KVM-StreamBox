@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use parking_lot::RwLock as ParkingRwLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,10 +10,9 @@ use tracing::{debug, error, info, trace, warn};
 use crate::error::{AppError, Result};
 use crate::ffi::vfmcap::{VfmcapColorMode, VfmcapOutputFmt, VfmcapSignalInfo};
 use crate::utils::LogThrottler;
-use crate::video::capture_trait::{CaptureStream, FrameData};
+use crate::video::capture_trait::{CaptureStream, DmaBufFrame, FrameData};
 use crate::video::encoder::aml_venc::AmlVencEncoder;
 use crate::video::encoder::registry::VideoEncoderType;
-use crate::video::format::Resolution;
 use crate::video::vfmcap_capture::AmlVfmcapCaptureStream;
 
 use super::EncodedVideoFrame;
@@ -21,6 +21,18 @@ const AUTO_STOP_GRACE_PERIOD_SECS: u64 = 3;
 const CAPTURE_TIMEOUT_STOP_THRESHOLD: u32 = 60;
 const ENCODE_ERROR_THROTTLE_SECS: u64 = 5;
 const VFMCAP_BUFFER_COUNT: u32 = 12;
+
+#[derive(Debug, Clone, Copy)]
+struct EncodeTask {
+    index: u32,
+    dmabuf_fd: i32,
+    dmabuf_fd2: i32,
+    width: u32,
+    height: u32,
+    bytesperline: u32,
+    size: u32,
+    format: u32,
+}
 
 fn create_encoder(
     config: &AmlPipelineConfig,
@@ -163,7 +175,7 @@ impl AmlPipeline {
         let pipeline = self.clone();
 
         std::thread::spawn(move || {
-            pipeline.run_capture_encode_loop();
+            pipeline.clone().run_capture_encode_loop();
             pipeline.thread_done.store(true, Ordering::Release);
         });
 
@@ -189,7 +201,83 @@ impl AmlPipeline {
         false
     }
 
-    fn run_capture_encode_loop(&self) {
+    fn run_encode_thread(
+        pipeline: Arc<AmlPipeline>,
+        mut encoder: AmlVencEncoder,
+        frame_rx: std::sync::mpsc::Receiver<EncodeTask>,
+        release_tx: std::sync::mpsc::Sender<u32>,
+        encode_active: Arc<AtomicBool>,
+        codec: VideoEncoderType,
+        fps: u32,
+    ) {
+        let encode_error_throttler = LogThrottler::with_secs(ENCODE_ERROR_THROTTLE_SECS);
+
+        while pipeline.running_flag.load(Ordering::Acquire) && encode_active.load(Ordering::Acquire)
+        {
+            if pipeline.keyframe_requested.swap(false, Ordering::AcqRel) {
+                encoder.request_keyframe();
+            }
+
+            let task = match frame_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(task) => task,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+
+            if !pipeline.running_flag.load(Ordering::Acquire)
+                || !encode_active.load(Ordering::Acquire)
+            {
+                let _ = release_tx.send(task.index);
+                while let Ok(queued) = frame_rx.try_recv() {
+                    let _ = release_tx.send(queued.index);
+                }
+                break;
+            }
+
+            let num_planes = if task.dmabuf_fd2 >= 0 { 2 } else { 1 };
+            let stride = encoder.width();
+
+            match encoder.encode_dma(task.dmabuf_fd, task.dmabuf_fd2, num_planes, stride) {
+                Ok(encoded) => {
+                    if !encoded.is_delay {
+                        let sequence = pipeline.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                        let pts_ms = encoded.pts_us as i64 / 1000;
+
+                        let frame = Arc::new(EncodedVideoFrame {
+                            data: Bytes::from(encoded.data),
+                            pts_ms,
+                            is_keyframe: encoded.is_keyframe,
+                            sequence,
+                            duration: Duration::from_millis(1000 / fps as u64),
+                            codec,
+                        });
+
+                        if sequence <= 5 || sequence % 60 == 0 {
+                            info!(
+                                "AML pipeline: encoded frame (seq={}, key={}, size={})",
+                                sequence,
+                                frame.is_keyframe,
+                                frame.data.len()
+                            );
+                        }
+                        pipeline.broadcast_encoded(frame);
+                    }
+                }
+                Err(e) => {
+                    if encode_error_throttler.should_log("aml_encode") {
+                        error!(
+                            "AML encode error for {}x{} bpl={} size={} fmt={:#x}: {}",
+                            task.width, task.height, task.bytesperline, task.size, task.format, e
+                        );
+                    }
+                }
+            }
+
+            let _ = release_tx.send(task.index);
+        }
+    }
+
+    fn run_capture_encode_loop(self: Arc<Self>) {
         let config = &self.config;
 
         // 1. Open capture at native resolution (0 = native, no upscale/downscale)
@@ -292,6 +380,8 @@ impl AmlPipeline {
             "AML pipeline: encoder created {}x{} @ {}fps codec={:?}",
             actual_resolution.width, actual_resolution.height, actual_fps, config.output_codec
         );
+        let encoder_width = encoder.width();
+        let encoder_height = encoder.height();
 
         // 4. Generate and broadcast VPS+SPS+PPS header
         match encoder.generate_header() {
@@ -320,8 +410,6 @@ impl AmlPipeline {
         let mut frame_count: u64 = 0;
         let mut fps_frame_count: u64 = 0;
         let mut last_fps_time = Instant::now();
-        let mut current_resolution = actual_resolution;
-        let encode_error_throttler = LogThrottler::with_secs(ENCODE_ERROR_THROTTLE_SECS);
 
         // --- Task 7.3: HDR color mode detection ---
         // Read signal info and auto-configure color mode based on HDR status
@@ -341,8 +429,35 @@ impl AmlPipeline {
             }
         }
 
+        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<EncodeTask>(8);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<u32>();
+        let encode_active = Arc::new(AtomicBool::new(true));
+        let mut pending_releases: HashMap<u32, DmaBufFrame> = HashMap::new();
+        let encode_handle = {
+            let pipeline = self.clone();
+            let encode_active = encode_active.clone();
+            let codec = config.output_codec;
+            std::thread::spawn(move || {
+                Self::run_encode_thread(
+                    pipeline,
+                    encoder,
+                    frame_rx,
+                    release_tx,
+                    encode_active,
+                    codec,
+                    actual_fps,
+                );
+            })
+        };
+
         let mut last_subscriber_log = Instant::now();
         while self.running_flag.load(Ordering::Acquire) {
+            while let Ok(index) = release_rx.try_recv() {
+                if let Some(dma) = pending_releases.remove(&index) {
+                    capture.release_frame(&FrameData::DmaBuf(dma));
+                }
+            }
+
             let sub_count = self.subscriber_count();
             let has_subscribers = sub_count > 0;
             if !has_subscribers {
@@ -362,7 +477,7 @@ impl AmlPipeline {
                 trace!("AML pipeline: no signal");
             }
 
-            let mut capture_result = match capture.next_frame() {
+            let capture_result = match capture.next_frame() {
                 Ok(r) => {
                     consecutive_timeouts = 0;
                     r
@@ -393,7 +508,7 @@ impl AmlPipeline {
                         "AML pipeline: first frame dma fd={} fd2={} w={} h={} bpl={} size={} fmt={:#x} enc={}x{}",
                         dma.dmabuf_fd, dma.dmabuf_fd2, dma.width, dma.height,
                         dma.bytesperline, dma.size, dma.format,
-                        encoder.width(), encoder.height()
+                        encoder_width, encoder_height
                     );
                 }
             }
@@ -401,141 +516,41 @@ impl AmlPipeline {
             // Handle reconfiguration
             if capture_result.reconfigured {
                 let new_res = capture_result.resolution;
-                if new_res.width == 0 || new_res.height == 0 {
-                    warn!(
-                        "AML pipeline: reconfigured to invalid resolution {}x{}, skipping encoder recreation",
-                        new_res.width, new_res.height
-                    );
-                    capture.release_frame(&capture_result.frame);
-                    continue;
-                }
                 info!(
-                    "AML pipeline: reconfigured {}x{} -> {}x{}, recreating encoder",
-                    current_resolution.width,
-                    current_resolution.height,
-                    new_res.width,
-                    new_res.height
+                    "AML pipeline: source reconfigured to {}x{}, stopping for rebuild",
+                    new_res.width, new_res.height
                 );
-
-                let target_w = if config.max_width > 0 && new_res.width > config.max_width {
-                    config.max_width
-                } else {
-                    new_res.width
-                };
-                let target_h = if config.max_height > 0 && new_res.height > config.max_height {
-                    config.max_height
-                } else {
-                    new_res.height
-                };
-
-                match create_encoder(config, target_w as i32, target_h as i32, actual_fps as i32) {
-                    Ok(mut new_encoder) => {
-                        match new_encoder.generate_header() {
-                            Ok(header) => {
-                                info!(
-                                    "AML pipeline: new encoder header ({} bytes) for {}x{}",
-                                    header.len(),
-                                    target_w,
-                                    target_h
-                                );
-                                let header_frame = Arc::new(EncodedVideoFrame {
-                                    data: Bytes::from(header),
-                                    pts_ms: 0,
-                                    is_keyframe: true,
-                                    sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
-                                    duration: Duration::from_millis(0),
-                                    codec: config.output_codec,
-                                });
-                                self.broadcast_encoded(header_frame);
-                            }
-                            Err(e) => {
-                                warn!("AML pipeline: failed to generate new encoder header: {}", e);
-                            }
-                        }
-
-                        let old_width = encoder.width();
-                        let old_height = encoder.height();
-                        encoder = new_encoder;
-                        current_resolution = Resolution::new(target_w, target_h);
-                        info!(
-                            "AML pipeline: encoder recreated {}x{} -> {}x{}",
-                            old_width, old_height, target_w, target_h
-                        );
-                    }
-                    Err(e) => {
-                        error!("AML pipeline: failed to recreate encoder for {}x{}: {}", target_w, target_h, e);
-                    }
-                }
-
                 capture.release_frame(&capture_result.frame);
-                continue;
+                break;
             }
 
-            if self.keyframe_requested.swap(false, Ordering::AcqRel) {
-                encoder.request_keyframe();
-                debug!("AML pipeline: keyframe requested for next frame");
-            }
-
-            // Always release the capture frame to keep vfmcap/vdin streaming.
-            // vfmcap/vdin cannot handle gaps where no frames are consumed;
-            // stopping capture even briefly corrupts the vfm data path.
             if has_subscribers {
-                // Encode: vfmcap Vulkan output has stride = width (no padding).
-                // The bytesperline field is from the raw V4L2 capture (AMLY format),
-                // not the converted NV12 output. Use encoder width as stride.
-                // dmabuf_fd = Y plane, dmabuf_fd2 = UV plane (separate buffers).
-                let encode_result = match &capture_result.frame {
+                match capture_result.frame {
                     FrameData::DmaBuf(dma) => {
-                        let num_planes = if dma.dmabuf_fd2 >= 0 { 2 } else { 1 };
-                        let stride = encoder.width();
-                        encoder.encode_dma(
-                            dma.dmabuf_fd,
-                            dma.dmabuf_fd2,
-                            num_planes,
-                            stride,
-                        )
+                        let task = EncodeTask {
+                            index: dma.index,
+                            dmabuf_fd: dma.dmabuf_fd,
+                            dmabuf_fd2: dma.dmabuf_fd2,
+                            width: dma.width,
+                            height: dma.height,
+                            bytesperline: dma.bytesperline,
+                            size: dma.size,
+                            format: dma.format,
+                        };
+                        pending_releases.insert(task.index, dma);
+                        if let Err(e) = frame_tx.send(task) {
+                            warn!("AML encode thread stopped while queueing frame: {}", e);
+                            if let Some(dma) = pending_releases.remove(&task.index) {
+                                capture.release_frame(&FrameData::DmaBuf(dma));
+                            }
+                            break;
+                        }
+                        frame_count += 1;
+                        fps_frame_count += 1;
                     }
                     FrameData::Mapped { .. } => {
                         error!("AML pipeline received Mapped frame, expected DmaBuf");
-                        capture.release_frame(&capture_result.frame);
                         continue;
-                    }
-                };
-
-                // Release capture frame immediately after encode.
-                // The VPU encoder has already read from the DMA buffer by this point.
-                capture.release_frame(&capture_result.frame);
-
-                match encode_result {
-                    Ok(encoded) => {
-                        if encoded.is_delay {
-                            continue;
-                        }
-
-                        frame_count += 1;
-                        fps_frame_count += 1;
-
-                        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-                        let pts_ms = encoded.pts_us as i64 / 1000;
-
-                        let frame = Arc::new(EncodedVideoFrame {
-                            data: Bytes::from(encoded.data),
-                            pts_ms,
-                            is_keyframe: encoded.is_keyframe,
-                            sequence,
-                            duration: Duration::from_millis(1000 / actual_fps as u64),
-                            codec: config.output_codec,
-                        });
-
-                        if frame_count <= 5 || frame_count % 60 == 0 {
-                            info!("AML pipeline: encoded frame #{} (seq={}, key={}, size={})", frame_count, sequence, frame.is_keyframe, frame.data.len());
-                        }
-                        self.broadcast_encoded(frame);
-                    }
-                    Err(e) => {
-                        if encode_error_throttler.should_log("aml_encode") {
-                            error!("AML encode error: {}", e);
-                        }
                     }
                 }
             } else {
@@ -556,6 +571,19 @@ impl AmlPipeline {
                 let mut s = self.stats.blocking_lock();
                 s.current_fps = current_fps;
             }
+        }
+
+        encode_active.store(false, Ordering::Release);
+        drop(frame_tx);
+        let _ = encode_handle.join();
+
+        while let Ok(index) = release_rx.try_recv() {
+            if let Some(dma) = pending_releases.remove(&index) {
+                capture.release_frame(&FrameData::DmaBuf(dma));
+            }
+        }
+        for (_, dma) in pending_releases.drain() {
+            capture.release_frame(&FrameData::DmaBuf(dma));
         }
 
         self.running_flag.store(false, Ordering::Release);
