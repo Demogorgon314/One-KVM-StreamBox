@@ -140,6 +140,18 @@ impl Default for AuthConfig {
     }
 }
 
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum HdrMode {
+    /// Auto: pass through HDR content as 10-bit P010; SDR stays 8-bit NV12.
+    #[default]
+    Auto,
+    /// SDR only: convert HDR inputs to SDR BT.709 NV12 before encoding.
+    SdrOnly,
+}
+
 /// Video capture configuration
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -157,6 +169,8 @@ pub struct VideoConfig {
     pub fps: u32,
     /// JPEG quality (1-100)
     pub quality: u32,
+    /// HDR handling mode
+    pub hdr_mode: HdrMode,
 }
 
 impl Default for VideoConfig {
@@ -168,6 +182,7 @@ impl Default for VideoConfig {
             height: 1080,
             fps: 30,
             quality: 80,
+            hdr_mode: HdrMode::Auto,
         }
     }
 }

@@ -257,12 +257,18 @@ fn run_aml_smoke_test(codec: VideoEncoderType, resolution: Resolution) -> Result
 
 #[cfg(feature = "aml")]
 fn run_aml_venc_smoke_test(codec: VideoEncoderType, resolution: Resolution) -> Result<()> {
+    use crate::ffi::multienc::VlImgFormat;
+
     let width = resolution.width as i32;
     let height = resolution.height as i32;
     let bitrate = bitrate_kbps_for_resolution(resolution) as i32;
     let mut encoder = match codec {
-        VideoEncoderType::H264 => AmlVencEncoder::new_h264(width, height, 30, bitrate, 30, 0, 0)?,
-        VideoEncoderType::H265 => AmlVencEncoder::new_h265(width, height, 30, bitrate, 30, 0, 0)?,
+        VideoEncoderType::H264 => {
+            AmlVencEncoder::new_h264(width, height, 30, bitrate, 30, 0, 0, VlImgFormat::Nv12)?
+        }
+        VideoEncoderType::H265 => {
+            AmlVencEncoder::new_h265(width, height, 30, bitrate, 30, 0, 0, VlImgFormat::Nv12)?
+        }
         _ => {
             return Err(AppError::VideoError(
                 "Unsupported AML hardware encoder codec".to_string(),

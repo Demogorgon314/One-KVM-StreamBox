@@ -32,6 +32,7 @@ pub struct WebRtcStreamerConfig {
     pub input_format: PixelFormat,
     pub bitrate_preset: BitratePreset,
     pub fps: u32,
+    pub hdr_mode: crate::config::HdrMode,
     pub audio_enabled: bool,
     pub encoder_backend: Option<EncoderBackend>,
 }
@@ -45,6 +46,7 @@ impl Default for WebRtcStreamerConfig {
             input_format: PixelFormat::Mjpeg,
             bitrate_preset: BitratePreset::Balanced,
             fps: 30,
+            hdr_mode: crate::config::HdrMode::Auto,
             audio_enabled: false,
             encoder_backend: None,
         }
@@ -487,6 +489,7 @@ impl WebRtcStreamer {
                 output_codec: Self::codec_type_to_encoder_type(codec),
                 bitrate_preset: config.bitrate_preset,
                 fps: config.fps,
+                hdr_mode: config.hdr_mode,
                 encoder_backend: config.encoder_backend,
             }
         };

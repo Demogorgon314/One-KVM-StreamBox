@@ -125,6 +125,8 @@ pub struct SharedVideoPipelineConfig {
     pub bitrate_preset: crate::video::encoder::BitratePreset,
     /// Target FPS
     pub fps: u32,
+    /// HDR handling mode for AML capture/encode paths.
+    pub hdr_mode: crate::config::HdrMode,
     /// Encoder backend (None = auto select best available)
     pub encoder_backend: Option<EncoderBackend>,
 }
@@ -137,6 +139,7 @@ impl Default for SharedVideoPipelineConfig {
             output_codec: VideoEncoderType::H264,
             bitrate_preset: crate::video::encoder::BitratePreset::Balanced,
             fps: 30,
+            hdr_mode: crate::config::HdrMode::Auto,
             encoder_backend: None,
         }
     }

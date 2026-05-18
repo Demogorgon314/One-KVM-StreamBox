@@ -247,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
             resolution: video_resolution,
             input_format: video_format,
             fps: config.video.fps,
+            hdr_mode: config.video.hdr_mode,
             bitrate_preset: config.stream.bitrate_preset,
             encoder_backend: one_kvm::stream_encoder::encoder_type_to_backend(
                 config.stream.encoder.clone(),

@@ -5,14 +5,16 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::error::{AppError, Result};
+use crate::ffi::multienc::VlImgFormat;
 use crate::ffi::vfmcap::{VfmcapColorMode, VfmcapOutputFmt, VfmcapSignalInfo};
 use crate::utils::LogThrottler;
 use crate::video::capture_trait::{CaptureStream, DmaBufFrame, FrameData};
 use crate::video::encoder::aml_venc::AmlVencEncoder;
 use crate::video::encoder::registry::VideoEncoderType;
+use crate::video::format::Resolution;
 use crate::video::vfmcap_capture::AmlVfmcapCaptureStream;
 
 use super::EncodedVideoFrame;
@@ -21,6 +23,23 @@ const AUTO_STOP_GRACE_PERIOD_SECS: u64 = 3;
 const CAPTURE_TIMEOUT_STOP_THRESHOLD: u32 = 60;
 const ENCODE_ERROR_THROTTLE_SECS: u64 = 5;
 const VFMCAP_BUFFER_COUNT: u32 = 12;
+const SIGNAL_INFO_SYSFS: &str = "/sys/class/video4linux/video0/signal_info";
+const HDMIRX_INFO_SYSFS: &str = "/sys/class/hdmirx/hdmirx0/info";
+
+#[derive(Debug, Clone)]
+struct SignalMetadata {
+    bitdepth: u32,
+    signal_type: u32,
+    hdr_status: u32,
+    hdr_eotf: String,
+}
+
+struct CaptureConfig {
+    capture: AmlVfmcapCaptureStream,
+    resolution: Resolution,
+    fps: u32,
+    img_format: VlImgFormat,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct EncodeTask {
@@ -34,11 +53,179 @@ struct EncodeTask {
     format: u32,
 }
 
+fn sysfs_read_resolution() -> Option<(u32, u32)> {
+    let s = std::fs::read_to_string(SIGNAL_INFO_SYSFS).ok()?;
+    let mut w: u32 = 0;
+    let mut h: u32 = 0;
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("width:") {
+            w = val.trim().parse().ok()?;
+        } else if let Some(val) = line.strip_prefix("height:") {
+            h = val.trim().parse().ok()?;
+        }
+    }
+    if w > 0 && h > 0 {
+        Some((w, h))
+    } else {
+        None
+    }
+}
+
+fn sysfs_read_signal() -> SignalMetadata {
+    let mut bitdepth: u32 = 8;
+    let mut signal_type: u32 = 0;
+    let mut hdr_status: u32 = 0;
+    let mut hdr_eotf = String::from("unknown");
+
+    if let Ok(s) = std::fs::read_to_string(SIGNAL_INFO_SYSFS) {
+        for line in s.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("bitdepth:") {
+                bitdepth = val.trim().parse().unwrap_or(8);
+            } else if let Some(val) = line.strip_prefix("signal_type:") {
+                signal_type =
+                    u32::from_str_radix(val.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+            }
+        }
+    }
+
+    if let Ok(s) = std::fs::read_to_string(HDMIRX_INFO_SYSFS) {
+        for line in s.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("Color Depth:") {
+                bitdepth = val.trim().parse().unwrap_or(bitdepth);
+            } else if let Some(val) = line.strip_prefix("HDR EOTF:") {
+                hdr_eotf = val.trim().to_string();
+            }
+        }
+
+        let eotf = hdr_eotf.to_ascii_uppercase();
+        hdr_status = if eotf.contains("HLG") {
+            2
+        } else if eotf.contains("HDR10+") || eotf.contains("HDR10PLUS") {
+            3
+        } else if eotf.contains("2084") || eotf.contains("HDR10") || eotf.contains("PQ") {
+            1
+        } else {
+            0
+        };
+    }
+
+    SignalMetadata {
+        bitdepth,
+        signal_type,
+        hdr_status,
+        hdr_eotf,
+    }
+}
+
+fn resolve_capture_params(
+    hdr_mode: crate::config::HdrMode,
+    signal_info: &VfmcapSignalInfo,
+) -> (VfmcapColorMode, VfmcapOutputFmt) {
+    let is_hdr = signal_info.hdr_status != 0;
+    match hdr_mode {
+        crate::config::HdrMode::Auto => {
+            if is_hdr {
+                (VfmcapColorMode::Passthrough, VfmcapOutputFmt::P010)
+            } else {
+                (VfmcapColorMode::Passthrough, VfmcapOutputFmt::Nv12)
+            }
+        }
+        crate::config::HdrMode::SdrOnly => {
+            let color_mode = detect_hdr_color_mode(signal_info);
+            (color_mode, VfmcapOutputFmt::Nv12)
+        }
+    }
+}
+
+fn open_capture_for_resolution(
+    config: &AmlPipelineConfig,
+) -> std::result::Result<CaptureConfig, AppError> {
+    let signal = sysfs_read_signal();
+    let fake_signal_info = VfmcapSignalInfo {
+        width: 0,
+        height: 0,
+        fps: 0,
+        pixelformat: 0,
+        signal_type: signal.signal_type,
+        hdr_status: signal.hdr_status,
+        is_interlaced: 0,
+        status: 0,
+        bitdepth: signal.bitdepth,
+    };
+
+    let (color_mode, output_fmt) = resolve_capture_params(config.hdr_mode, &fake_signal_info);
+    let img_format = if output_fmt == VfmcapOutputFmt::P010 {
+        VlImgFormat::P010
+    } else {
+        VlImgFormat::Nv12
+    };
+
+    info!(
+        "AML pipeline: hdr_mode={:?}, hdmi_eotf={} bitdepth={} hdr_status={} signal_type={:#x} -> color_mode={:?} output={:?} img_format={:?}",
+        config.hdr_mode, signal.hdr_eotf, signal.bitdepth, signal.hdr_status, signal.signal_type,
+        color_mode, output_fmt, img_format
+    );
+
+    let (source_w, source_h) = sysfs_read_resolution().unwrap_or((0, 0));
+    let should_scale = source_w > 0
+        && source_h > 0
+        && config.max_width > 0
+        && config.max_height > 0
+        && (source_w > config.max_width || source_h > config.max_height);
+    let target_w = if should_scale { config.max_width } else { 0 };
+    let target_h = if should_scale { config.max_height } else { 0 };
+
+    let mut capture = AmlVfmcapCaptureStream::open(
+        &config.device,
+        output_fmt,
+        target_w,
+        target_h,
+        config.max_fps,
+        color_mode,
+        VFMCAP_BUFFER_COUNT,
+    )?;
+
+    let resolution = capture.resolution();
+    let fps = match capture.signal_info() {
+        Ok(info) if info.fps > 0 => {
+            let raw_fps = if info.fps > 1000 { info.fps / 1000 } else { info.fps };
+            if config.max_fps > 0.0 {
+                raw_fps.min(config.max_fps as u32)
+            } else {
+                raw_fps
+            }
+        }
+        _ => {
+            if config.max_fps > 0.0 {
+                config.max_fps as u32
+            } else {
+                30
+            }
+        }
+    };
+
+    info!(
+        "AML pipeline: capture opened {}x{} @ {}fps img_format={:?}",
+        resolution.width, resolution.height, fps, img_format
+    );
+
+    Ok(CaptureConfig {
+        capture,
+        resolution,
+        fps,
+        img_format,
+    })
+}
+
 fn create_encoder(
     config: &AmlPipelineConfig,
     width: i32,
     height: i32,
     fps: i32,
+    img_format: VlImgFormat,
 ) -> std::result::Result<AmlVencEncoder, AppError> {
     match config.output_codec {
         VideoEncoderType::H265 => AmlVencEncoder::new_h265(
@@ -49,6 +236,7 @@ fn create_encoder(
             config.gop,
             config.gop_pattern,
             config.rc_mode,
+            img_format,
         ),
         VideoEncoderType::H264 => AmlVencEncoder::new_h264(
             width,
@@ -58,6 +246,7 @@ fn create_encoder(
             config.gop,
             config.gop_pattern,
             config.rc_mode,
+            img_format,
         ),
         _ => Err(AppError::VideoError(
             "AML pipeline only supports H264/H265".to_string(),
@@ -69,7 +258,7 @@ pub struct AmlPipelineConfig {
     pub max_width: u32,
     pub max_height: u32,
     pub max_fps: f32,
-    pub color_mode: VfmcapColorMode,
+    pub hdr_mode: crate::config::HdrMode,
     pub output_codec: VideoEncoderType,
     pub bitrate_kbps: u32,
     pub gop: i32,
@@ -84,7 +273,7 @@ impl Default for AmlPipelineConfig {
             max_width: 3840,
             max_height: 2160,
             max_fps: 240.0,
-            color_mode: VfmcapColorMode::Passthrough,
+            hdr_mode: crate::config::HdrMode::Auto,
             output_codec: VideoEncoderType::H265,
             bitrate_kbps: 8000,
             gop: 30,
@@ -235,7 +424,10 @@ impl AmlPipeline {
             }
 
             let num_planes = if task.dmabuf_fd2 >= 0 { 2 } else { 1 };
-            let stride = encoder.width();
+            let stride = match encoder.img_format() {
+                VlImgFormat::P010 => encoder.width() * 2,
+                _ => encoder.width(),
+            };
 
             match encoder.encode_dma(task.dmabuf_fd, task.dmabuf_fd2, num_planes, stride) {
                 Ok(encoded) => {
@@ -280,17 +472,13 @@ impl AmlPipeline {
     fn run_capture_encode_loop(self: Arc<Self>) {
         let config = &self.config;
 
-        // 1. Open capture at native resolution (0 = native, no upscale/downscale)
-        let mut capture = match AmlVfmcapCaptureStream::open(
-            &config.device,
-            VfmcapOutputFmt::Nv12,
-            0, // native resolution
-            0,
-            0.0, // native fps
-            config.color_mode,
-            VFMCAP_BUFFER_COUNT,
-        ) {
-            Ok(c) => c,
+        let CaptureConfig {
+            mut capture,
+            resolution: actual_resolution,
+            fps: actual_fps,
+            img_format,
+        } = match open_capture_for_resolution(config) {
+            Ok(capture_config) => capture_config,
             Err(e) => {
                 error!("Failed to open vfmcap: {}", e);
                 self.running_flag.store(false, Ordering::Release);
@@ -299,74 +487,14 @@ impl AmlPipeline {
             }
         };
 
-        let native_resolution = capture.resolution();
-        info!(
-            "AML pipeline: capture opened native {}x{}",
-            native_resolution.width, native_resolution.height
-        );
-
-        // 2. If native resolution exceeds limit, re-open with limit to downscale
-        let actual_resolution = if config.max_width > 0
-            && config.max_height > 0
-            && (native_resolution.width > config.max_width
-                || native_resolution.height > config.max_height)
-        {
-            info!(
-                "AML pipeline: native {}x{} exceeds limit {}x{}, downscaling",
-                native_resolution.width, native_resolution.height,
-                config.max_width, config.max_height
-            );
-            capture = match AmlVfmcapCaptureStream::open(
-                &config.device,
-                VfmcapOutputFmt::Nv12,
-                config.max_width,
-                config.max_height,
-                config.max_fps,
-                config.color_mode,
-                VFMCAP_BUFFER_COUNT,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("Failed to re-open vfmcap for downscale: {}", e);
-                    self.running_flag.store(false, Ordering::Release);
-                    let _ = self.running.send(false);
-                    return;
-                }
-            };
-            let res = capture.resolution();
-            info!(
-                "AML pipeline: capture re-opened at {}x{} (downscaled)",
-                res.width, res.height
-            );
-            res
-        } else {
-            native_resolution
-        };
-
-        // Determine actual fps from signal info or config limit
-        let actual_fps = match capture.signal_info() {
-            Ok(info) if info.fps > 0 => {
-                let fps = if config.max_fps > 0.0 {
-                    info.fps.min(config.max_fps as u32)
-                } else {
-                    info.fps
-                };
-                info!("AML pipeline: signal fps={}, using fps={}", info.fps, fps);
-                fps
-            }
-            _ => {
-                let fps = if config.max_fps > 0.0 {
-                    config.max_fps as u32
-                } else {
-                    30
-                };
-                info!("AML pipeline: no signal fps, using fps={}", fps);
-                fps
-            }
-        };
-
         // 3. Open encoder with actual capture resolution (not the limit)
-        let mut encoder = match create_encoder(config, actual_resolution.width as i32, actual_resolution.height as i32, actual_fps as i32) {
+        let mut encoder = match create_encoder(
+            config,
+            actual_resolution.width as i32,
+            actual_resolution.height as i32,
+            actual_fps as i32,
+            img_format,
+        ) {
             Ok(e) => e,
             Err(e) => {
                 error!("Failed to create AML encoder: {}", e);
@@ -377,8 +505,8 @@ impl AmlPipeline {
         };
 
         info!(
-            "AML pipeline: encoder created {}x{} @ {}fps codec={:?}",
-            actual_resolution.width, actual_resolution.height, actual_fps, config.output_codec
+            "AML pipeline: encoder created {}x{} @ {}fps codec={:?} img_format={:?}",
+            actual_resolution.width, actual_resolution.height, actual_fps, config.output_codec, img_format
         );
         let encoder_width = encoder.width();
         let encoder_height = encoder.height();
@@ -410,24 +538,6 @@ impl AmlPipeline {
         let mut frame_count: u64 = 0;
         let mut fps_frame_count: u64 = 0;
         let mut last_fps_time = Instant::now();
-
-        // --- Task 7.3: HDR color mode detection ---
-        // Read signal info and auto-configure color mode based on HDR status
-        match capture.signal_info() {
-            Ok(info) => {
-                let detected_color_mode = detect_hdr_color_mode(&info);
-                if detected_color_mode != config.color_mode {
-                    info!(
-                        "AML pipeline: auto-detected color mode {:?} from HDR status {}",
-                        detected_color_mode, info.hdr_status
-                    );
-                    // Note: color_mode change requires pipeline restart
-                }
-            }
-            Err(e) => {
-                debug!("AML pipeline: could not read signal info for HDR detection: {}", e);
-            }
-        }
 
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<EncodeTask>(8);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<u32>();

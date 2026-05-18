@@ -71,6 +71,7 @@ pub struct AmlVencEncoder {
     codec: VlCodecId,
     out_buf: Vec<u8>,
     pending_frame_type: VlFrameType,
+    img_format: VlImgFormat,
 }
 
 unsafe impl Send for AmlVencEncoder {}
@@ -94,6 +95,7 @@ impl AmlVencEncoder {
         gop: i32,
         gop_pattern: i32,
         rc_mode: i32,
+        img_format: VlImgFormat,
     ) -> Result<Self> {
         Self::new(
             VlCodecId::H265,
@@ -104,6 +106,7 @@ impl AmlVencEncoder {
             gop,
             gop_pattern,
             rc_mode,
+            img_format,
         )
     }
 
@@ -115,6 +118,7 @@ impl AmlVencEncoder {
         gop: i32,
         gop_pattern: i32,
         rc_mode: i32,
+        img_format: VlImgFormat,
     ) -> Result<Self> {
         Self::new(
             VlCodecId::H264,
@@ -125,6 +129,7 @@ impl AmlVencEncoder {
             gop,
             gop_pattern,
             rc_mode,
+            img_format,
         )
     }
 
@@ -137,7 +142,13 @@ impl AmlVencEncoder {
         gop: i32,
         gop_pattern: i32,
         rc_mode: i32,
+        img_format: VlImgFormat,
     ) -> Result<Self> {
+        let bit_depth: i32 = match img_format {
+            VlImgFormat::P010 => 10,
+            _ => 8,
+        };
+
         let mut encode_info: VlEncodeInfo = unsafe { std::mem::zeroed() };
         encode_info.width = width;
         encode_info.height = height;
@@ -145,12 +156,22 @@ impl AmlVencEncoder {
         encode_info.bit_rate = bitrate.saturating_mul(1000);
         encode_info.gop = gop;
         encode_info.prepend_spspps_to_idr_frames = true;
-        encode_info.img_format = VlImgFormat::Nv12;
+        encode_info.img_format = img_format;
         encode_info.enc_feature_opts = ENABLE_ROI_FEATURE;
-        encode_info.internal_bit_depth = 8;
+        encode_info.internal_bit_depth = bit_depth;
         encode_info.gop_pattern = gop_pattern;
         encode_info.rc_mode = rc_mode;
         encode_info.bitstream_buf_sz_kb = choose_bitstream_buf_sz_kb(width, height);
+
+        if bit_depth == 10 {
+            encode_info.vui_parameters_present_flag = 1;
+            encode_info.video_signal_type_present_flag = 1;
+            encode_info.video_full_range_flag = 0;
+            encode_info.colour_description_present_flag = 1;
+            encode_info.colour_primaries = 9;
+            encode_info.transfer_characteristics = 16;
+            encode_info.matrix_coefficients = 9;
+        }
 
         let mut qp: QpParam = unsafe { std::mem::zeroed() };
         qp.qp_min = 0;
@@ -180,7 +201,12 @@ impl AmlVencEncoder {
             codec,
             out_buf: vec![0u8; BITSTREAM_BUF_SIZE],
             pending_frame_type: VlFrameType::Auto,
+            img_format,
         })
+    }
+
+    pub fn img_format(&self) -> VlImgFormat {
+        self.img_format
     }
 
     pub fn generate_header(&mut self) -> Result<Vec<u8>> {
@@ -222,26 +248,11 @@ impl AmlVencEncoder {
                 },
             },
             buf_stride: stride,
-            buf_fmt: VlImgFormat::Nv12,
+            buf_fmt: self.img_format,
         };
 
         let mut ret_buf: VlBufferInfo = unsafe { std::mem::zeroed() };
         let frame_type = std::mem::replace(&mut self.pending_frame_type, VlFrameType::Auto);
-
-        {
-            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                let bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        &buf_info as *const VlBufferInfo as *const u8,
-                        std::mem::size_of::<VlBufferInfo>(),
-                    )
-                };
-                warn!("ENCODE_DEBUG buf_info hex: {:02x?}", bytes);
-                warn!("ENCODE_DEBUG handle={} frame_type={:?} stride={} num_planes={} fd={} fd2={}", self.handle, frame_type, stride, num_planes, dmabuf_fd, dmabuf_fd2);
-                warn!("ENCODE_DEBUG VlBufferInfo size={}", std::mem::size_of::<VlBufferInfo>());
-            }
-        }
 
         dma_buf_sync_write_end(dmabuf_fd);
         dma_buf_sync_read_start(dmabuf_fd);
@@ -299,7 +310,7 @@ impl AmlVencEncoder {
                 ],
             },
             buf_stride: stride,
-            buf_fmt: VlImgFormat::Nv12,
+            buf_fmt: self.img_format,
         };
 
         let mut ret_buf: VlBufferInfo = unsafe { std::mem::zeroed() };
