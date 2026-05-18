@@ -524,16 +524,14 @@ impl HidConfig {
             return None;
         }
         match self.otg_endpoint_budget {
-            OtgEndpointBudget::Five => Some(5),
-            OtgEndpointBudget::Six => Some(6),
-            OtgEndpointBudget::Unlimited => None,
+            OtgEndpointBudget::Five
+            | OtgEndpointBudget::Six
+            | OtgEndpointBudget::Eight
+            | OtgEndpointBudget::Ten
+            | OtgEndpointBudget::Unlimited => self.otg_endpoint_budget.endpoint_limit_raw(),
             OtgEndpointBudget::Auto => {
                 let udc = self.resolved_otg_udc().unwrap_or_default();
-                if crate::otg::configfs::is_low_endpoint_udc(&udc) {
-                    Some(5)
-                } else {
-                    Some(6)
-                }
+                OtgEndpointBudget::default_for_udc_name(Some(&udc)).endpoint_limit_raw()
             }
         }
     }

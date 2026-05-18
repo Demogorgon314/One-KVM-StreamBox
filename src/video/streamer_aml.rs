@@ -225,6 +225,8 @@ impl Streamer {
         self.publish_event(SystemEvent::StreamStateChanged {
             state: state.to_string(),
             device: self.current_device().await.map(|d| d.path.display().to_string()),
+            reason: None,
+            next_retry_ms: None,
         })
         .await;
     }

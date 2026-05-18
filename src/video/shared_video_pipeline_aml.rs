@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use parking_lot::RwLock as ParkingRwLock;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,16 +8,7 @@ use crate::error::{AppError, Result};
 use crate::video::aml_pipeline::{AmlPipeline, AmlPipelineConfig};
 use crate::video::encoder::registry::VideoEncoderType;
 use crate::video::format::{PixelFormat, Resolution};
-
-#[derive(Debug, Clone)]
-pub struct EncodedVideoFrame {
-    pub data: Bytes,
-    pub pts_ms: i64,
-    pub is_keyframe: bool,
-    pub sequence: u64,
-    pub duration: Duration,
-    pub codec: VideoEncoderType,
-}
+use crate::video::shared_video_pipeline::EncodedVideoFrame;
 
 #[derive(Debug, Clone)]
 pub struct SharedVideoPipelineConfig {
