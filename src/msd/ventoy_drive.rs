@@ -30,7 +30,7 @@ impl VentoyDrive {
     }
 
     pub fn exists(&self) -> bool {
-        self.path.exists()
+        self.path.exists() && VentoyImage::open(&self.path).is_ok()
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -501,6 +501,19 @@ mod tests {
         let info = drive.init(MIN_DRIVE_SIZE_MB).await.unwrap();
         assert!(info.initialized);
         assert!(drive.exists());
+    }
+
+    #[tokio::test]
+    async fn test_empty_drive_file_is_not_initialized() {
+        let temp_dir = TempDir::new().unwrap();
+        let drive_path = temp_dir.path().join("empty_ventoy.img");
+        let file = std::fs::File::create(&drive_path).unwrap();
+        file.set_len(1024 * 1024 * 1024).unwrap();
+
+        let drive = VentoyDrive::new(drive_path);
+
+        assert!(!drive.exists());
+        assert!(drive.info().await.is_err());
     }
 
     #[tokio::test]

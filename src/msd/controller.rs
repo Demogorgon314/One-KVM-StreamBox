@@ -8,6 +8,7 @@ use tracing::{debug, info, warn};
 use super::image::ImageManager;
 use super::monitor::MsdHealthMonitor;
 use super::types::{DownloadProgress, DownloadStatus, DriveInfo, ImageInfo, MsdMode, MsdState};
+use super::ventoy_drive::VentoyDrive;
 use crate::error::{AppError, Result};
 use crate::otg::{MsdFunction, MsdLunConfig, OtgService};
 
@@ -64,20 +65,23 @@ impl MsdController {
         let mut state = self.state.write().await;
         state.available = true;
 
-        if self.drive_path.exists() {
-            if let Ok(metadata) = std::fs::metadata(&self.drive_path) {
-                state.drive_info = Some(DriveInfo {
-                    size: metadata.len(),
-                    used: 0,
-                    free: metadata.len(),
-                    initialized: true,
-                    path: self.drive_path.clone(),
-                });
+        let drive = VentoyDrive::new(self.drive_path.clone());
+        match drive.info().await {
+            Ok(info) => {
+                state.drive_info = Some(info);
                 debug!(
                     "Found existing virtual drive: {}",
                     self.drive_path.display()
                 );
             }
+            Err(e) if self.drive_path.exists() => {
+                warn!(
+                    "Ignoring invalid virtual drive at {}: {}",
+                    self.drive_path.display(),
+                    e
+                );
+            }
+            Err(_) => {}
         }
 
         info!("MSD controller initialized");
@@ -156,7 +160,7 @@ impl MsdController {
 
         self.assert_can_connect(&state).await?;
 
-        if !self.drive_path.exists() {
+        if !VentoyDrive::new(self.drive_path.clone()).exists() {
             let err =
                 AppError::Internal("Virtual drive not initialized. Call init first.".to_string());
             self.monitor
