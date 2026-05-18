@@ -149,11 +149,7 @@ impl WebRtcStreamer {
         // Close all existing sessions
         self.close_all_sessions().await;
 
-        // Stop current pipeline
-        if let Some(ref pipeline) = *self.video_pipeline.read().await {
-            pipeline.stop();
-        }
-        *self.video_pipeline.write().await = None;
+        self.stop_current_pipeline_and_wait("codec change").await;
 
         // Update codec
         *self.video_codec.write().await = codec;
@@ -201,6 +197,20 @@ impl WebRtcStreamer {
 
     fn should_stop_pipeline(session_count: usize, subscriber_count: usize) -> bool {
         session_count == 0 && subscriber_count == 0
+    }
+
+    async fn stop_current_pipeline_and_wait(&self, reason: &str) {
+        let pipeline = {
+            let mut guard = self.video_pipeline.write().await;
+            guard.take()
+        };
+
+        if let Some(pipeline) = pipeline {
+            info!("Stopping video pipeline and waiting for release: {}", reason);
+            pipeline
+                .stop_and_wait(std::time::Duration::from_secs(3))
+                .await;
+        }
     }
 
     async fn stop_pipeline_if_idle(&self, reason: &str) {
@@ -736,11 +746,9 @@ impl WebRtcStreamer {
     /// This stops the encoding pipeline and closes all sessions.
     pub async fn prepare_for_config_change(&self) {
         // Stop pipeline and close sessions - will be recreated on next session
-        if let Some(ref pipeline) = *self.video_pipeline.read().await {
-            pipeline.stop();
-        }
-        *self.video_pipeline.write().await = None;
         self.close_all_sessions().await;
+        self.stop_current_pipeline_and_wait("prepare for config change")
+            .await;
     }
 
     // === Configuration ===
@@ -775,12 +783,6 @@ impl WebRtcStreamer {
             resolution.width, resolution.height, format, fps
         );
 
-        // Stop existing pipeline
-        if let Some(ref pipeline) = *self.video_pipeline.read().await {
-            pipeline.stop();
-        }
-        *self.video_pipeline.write().await = None;
-
         // Close all existing sessions - they need to reconnect
         let session_count = self.close_all_sessions().await;
         if session_count > 0 {
@@ -789,6 +791,8 @@ impl WebRtcStreamer {
                 session_count
             );
         }
+        self.stop_current_pipeline_and_wait("video config change")
+            .await;
 
         // Update config (preserve user-configured bitrate)
         {
@@ -839,12 +843,6 @@ impl WebRtcStreamer {
 
     /// Update encoder backend (software/hardware selection)
     pub async fn update_encoder_backend(&self, encoder_backend: Option<EncoderBackend>) {
-        // Stop existing pipeline
-        if let Some(ref pipeline) = *self.video_pipeline.read().await {
-            pipeline.stop();
-        }
-        *self.video_pipeline.write().await = None;
-
         // Close all existing sessions - they need to reconnect with new encoder
         let session_count = self.close_all_sessions().await;
         if session_count > 0 {
@@ -853,6 +851,8 @@ impl WebRtcStreamer {
                 session_count
             );
         }
+        self.stop_current_pipeline_and_wait("encoder backend change")
+            .await;
 
         // Update config
         let mut config = self.config.write().await;
@@ -1227,16 +1227,7 @@ impl WebRtcStreamer {
         if pipeline_running {
             info!("Restarting video pipeline to apply new bitrate: {}", preset);
 
-            // Stop existing pipeline
-            if let Some(ref pipeline) = *self.video_pipeline.read().await {
-                pipeline.stop();
-            }
-
-            // Wait for pipeline to stop
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Clear pipeline reference - will be recreated
-            *self.video_pipeline.write().await = None;
+            self.stop_current_pipeline_and_wait("bitrate change").await;
 
             let has_source = self.capture_device.read().await.is_some();
             if !has_source {
