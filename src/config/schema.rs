@@ -145,7 +145,7 @@ impl Default for AuthConfig {
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum HdrMode {
-    /// Auto: pass through HDR content as 10-bit P010; SDR stays 8-bit NV12.
+    /// Auto: convert HDR inputs to SDR BT.709 NV12 for browser compatibility.
     #[default]
     Auto,
     /// SDR only: convert HDR inputs to SDR BT.709 NV12 before encoding.

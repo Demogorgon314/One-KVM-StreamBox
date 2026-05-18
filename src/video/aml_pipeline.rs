@@ -105,7 +105,11 @@ fn sysfs_read_signal() -> SignalMetadata {
             2
         } else if eotf.contains("HDR10+") || eotf.contains("HDR10PLUS") {
             3
-        } else if eotf.contains("2084") || eotf.contains("HDR10") || eotf.contains("PQ") {
+        } else if eotf.contains("2084")
+            || eotf.contains("2048")
+            || eotf.contains("HDR10")
+            || eotf.contains("PQ")
+        {
             1
         } else {
             0
@@ -128,7 +132,7 @@ fn resolve_capture_params(
     match hdr_mode {
         crate::config::HdrMode::Auto => {
             if is_hdr {
-                (VfmcapColorMode::Passthrough, VfmcapOutputFmt::P010)
+                (detect_hdr_color_mode(signal_info), VfmcapOutputFmt::Nv12)
             } else {
                 (VfmcapColorMode::Passthrough, VfmcapOutputFmt::Nv12)
             }
