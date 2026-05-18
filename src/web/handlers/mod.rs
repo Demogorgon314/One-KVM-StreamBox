@@ -726,6 +726,14 @@ pub async fn setup_init(
     // Get updated config for HID reload
     let new_config = state.config.get();
 
+    #[cfg(feature = "aml")]
+    crate::hdmi_rx_edid::sync_from_video_config(
+        new_config.video.width,
+        new_config.video.height,
+        new_config.video.fps,
+    )
+    .await;
+
     if let Err(e) = state
         .otg_service
         .apply_config(&new_config.hid, &new_config.msd)

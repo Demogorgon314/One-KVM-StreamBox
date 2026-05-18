@@ -21,6 +21,14 @@ pub enum VfmcapColorMode {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VfmcapOutputLayout {
+    Auto = 0,
+    SingleDmaBuf = 1,
+    TwoDmaBuf = 2,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct VfmcapConfig {
     pub output_format: VfmcapOutputFmt,
@@ -115,6 +123,8 @@ extern "C" {
 
     pub fn vfmcap_last_error(ctx: *mut VfmcapCtx) -> *const c_char;
 
+    pub fn vfmcap_set_output_layout(ctx: *mut VfmcapCtx, layout: VfmcapOutputLayout) -> c_int;
+
     pub fn vfmcap_output_size(width: c_uint, height: c_uint, fmt: VfmcapOutputFmt) -> c_uint;
 }
 
@@ -171,5 +181,6 @@ mod tests {
     fn enum_sizes() {
         assert_eq!(size_of::<VfmcapOutputFmt>(), 4);
         assert_eq!(size_of::<VfmcapColorMode>(), 4);
+        assert_eq!(size_of::<VfmcapOutputLayout>(), 4);
     }
 }

@@ -21,6 +21,7 @@ use super::EncodedVideoFrame;
 
 const AUTO_STOP_GRACE_PERIOD_SECS: u64 = 3;
 const CAPTURE_TIMEOUT_STOP_THRESHOLD: u32 = 60;
+const CAPTURE_VULKAN_ERROR_STOP_THRESHOLD: u32 = 5;
 const ENCODE_ERROR_THROTTLE_SECS: u64 = 5;
 const VFMCAP_BUFFER_COUNT: u32 = 12;
 const SIGNAL_INFO_SYSFS: &str = "/sys/class/video4linux/video0/signal_info";
@@ -28,6 +29,8 @@ const HDMIRX_INFO_SYSFS: &str = "/sys/class/hdmirx/hdmirx0/info";
 
 #[derive(Debug, Clone)]
 struct SignalMetadata {
+    width: u32,
+    height: u32,
     bitdepth: u32,
     signal_type: u32,
     hdr_status: u32,
@@ -73,7 +76,13 @@ fn sysfs_read_resolution() -> Option<(u32, u32)> {
     }
 }
 
+pub fn sysfs_current_resolution() -> Option<Resolution> {
+    sysfs_read_resolution().map(|(width, height)| Resolution::new(width, height))
+}
+
 fn sysfs_read_signal() -> SignalMetadata {
+    let mut width: u32 = 0;
+    let mut height: u32 = 0;
     let mut bitdepth: u32 = 8;
     let mut signal_type: u32 = 0;
     let mut hdr_status: u32 = 0;
@@ -82,7 +91,11 @@ fn sysfs_read_signal() -> SignalMetadata {
     if let Ok(s) = std::fs::read_to_string(SIGNAL_INFO_SYSFS) {
         for line in s.lines() {
             let line = line.trim();
-            if let Some(val) = line.strip_prefix("bitdepth:") {
+            if let Some(val) = line.strip_prefix("width:") {
+                width = val.trim().parse().unwrap_or(width);
+            } else if let Some(val) = line.strip_prefix("height:") {
+                height = val.trim().parse().unwrap_or(height);
+            } else if let Some(val) = line.strip_prefix("bitdepth:") {
                 bitdepth = val.trim().parse().unwrap_or(8);
             } else if let Some(val) = line.strip_prefix("signal_type:") {
                 signal_type =
@@ -96,6 +109,10 @@ fn sysfs_read_signal() -> SignalMetadata {
             let line = line.trim();
             if let Some(val) = line.strip_prefix("Color Depth:") {
                 bitdepth = val.trim().parse().unwrap_or(bitdepth);
+            } else if let Some(val) = line.strip_prefix("Hactive:") {
+                width = val.trim().parse().unwrap_or(width);
+            } else if let Some(val) = line.strip_prefix("Vactive:") {
+                height = val.trim().parse().unwrap_or(height);
             } else if let Some(val) = line.strip_prefix("HDR EOTF:") {
                 hdr_eotf = val.trim().to_string();
             }
@@ -118,11 +135,42 @@ fn sysfs_read_signal() -> SignalMetadata {
     }
 
     SignalMetadata {
+        width,
+        height,
         bitdepth,
         signal_type,
         hdr_status,
         hdr_eotf,
     }
+}
+
+fn signal_metadata_changed(initial: &SignalMetadata, current: &SignalMetadata) -> bool {
+    current.hdr_status != initial.hdr_status
+        || current.bitdepth != initial.bitdepth
+        || current.signal_type != initial.signal_type
+        || (current.width > 0
+            && current.height > 0
+            && initial.width > 0
+            && initial.height > 0
+            && (current.width != initial.width || current.height != initial.height))
+}
+
+fn info_signal_change(initial: &SignalMetadata, current: &SignalMetadata) {
+    info!(
+        "AML pipeline: HDMI signal changed, stopping for rebuild ({}x{} -> {}x{}, hdr {}->{}, bitdepth {}->{}, signal_type {:#x}->{:#x}, eotf {}->{})",
+        initial.width,
+        initial.height,
+        current.width,
+        current.height,
+        initial.hdr_status,
+        current.hdr_status,
+        initial.bitdepth,
+        current.bitdepth,
+        initial.signal_type,
+        current.signal_type,
+        initial.hdr_eotf,
+        current.hdr_eotf
+    );
 }
 
 fn resolve_capture_params(
@@ -486,261 +534,374 @@ impl AmlPipeline {
     fn run_capture_encode_loop(self: Arc<Self>) {
         let config = &self.config;
 
-        let CaptureConfig {
-            mut capture,
-            resolution: actual_resolution,
-            fps: actual_fps,
-            img_format,
-            signal: initial_signal,
-        } = match open_capture_for_resolution(config) {
-            Ok(capture_config) => capture_config,
-            Err(e) => {
-                error!("Failed to open vfmcap: {}", e);
-                self.running_flag.store(false, Ordering::Release);
-                let _ = self.running.send(false);
-                return;
+        'outer: while self.running_flag.load(Ordering::Acquire) {
+            let CaptureConfig {
+                mut capture,
+                resolution: actual_resolution,
+                fps: actual_fps,
+                img_format,
+                signal: initial_signal,
+            } = match open_capture_for_resolution(config) {
+                Ok(capture_config) => capture_config,
+                Err(e) => {
+                    error!("Failed to open vfmcap: {}", e);
+                    break 'outer;
+                }
+            };
+
+            let mut encoder = match create_encoder(
+                config,
+                actual_resolution.width as i32,
+                actual_resolution.height as i32,
+                actual_fps as i32,
+                img_format,
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("Failed to create AML encoder: {}", e);
+                    break 'outer;
+                }
+            };
+
+            info!(
+                "AML pipeline: encoder created {}x{} @ {}fps codec={:?} img_format={:?}",
+                actual_resolution.width,
+                actual_resolution.height,
+                actual_fps,
+                config.output_codec,
+                img_format
+            );
+            let encoder_width = encoder.width();
+            let encoder_height = encoder.height();
+
+            match encoder.generate_header() {
+                Ok(header) => {
+                    info!("AML pipeline: generated header ({} bytes)", header.len());
+                    let header_frame = Arc::new(EncodedVideoFrame {
+                        data: Bytes::from(header),
+                        pts_ms: 0,
+                        is_keyframe: true,
+                        sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+                        duration: Duration::from_millis(0),
+                        codec: config.output_codec,
+                    });
+                    self.broadcast_encoded(header_frame);
+                }
+                Err(e) => {
+                    warn!("Failed to generate encoder header: {}", e);
+                }
             }
-        };
 
-        // 3. Open encoder with actual capture resolution (not the limit)
-        let mut encoder = match create_encoder(
-            config,
-            actual_resolution.width as i32,
-            actual_resolution.height as i32,
-            actual_fps as i32,
-            img_format,
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                error!("Failed to create AML encoder: {}", e);
-                self.running_flag.store(false, Ordering::Release);
-                let _ = self.running.send(false);
-                return;
+            let mut consecutive_timeouts: u32 = 0;
+            let mut consecutive_vulkan_errors: u32 = 0;
+            let mut frame_count: u64 = 0;
+            let mut fps_frame_count: u64 = 0;
+            let mut last_fps_time = Instant::now();
+            let mut last_signal_check = Instant::now();
+            let mut should_recreate = false;
+
+            let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<EncodeTask>(8);
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<u32>();
+            let encode_active = Arc::new(AtomicBool::new(true));
+            let mut pending_releases: HashMap<u32, DmaBufFrame> = HashMap::new();
+            let encode_handle = {
+                let pipeline = self.clone();
+                let encode_active = encode_active.clone();
+                let codec = config.output_codec;
+                std::thread::spawn(move || {
+                    Self::run_encode_thread(
+                        pipeline,
+                        encoder,
+                        frame_rx,
+                        release_tx,
+                        encode_active,
+                        codec,
+                        actual_fps,
+                    );
+                })
+            };
+
+            let mut last_subscriber_log = Instant::now();
+            while self.running_flag.load(Ordering::Acquire) {
+                while let Ok(index) = release_rx.try_recv() {
+                    if let Some(dma) = pending_releases.remove(&index) {
+                        capture.release_frame(&FrameData::DmaBuf(dma));
+                    }
+                }
+
+                let sub_count = self.subscriber_count();
+                let has_subscribers = sub_count > 0;
+                if !has_subscribers && last_subscriber_log.elapsed() >= Duration::from_secs(5) {
+                    info!("AML pipeline: no subscribers, capturing but not encoding");
+                    last_subscriber_log = Instant::now();
+                }
+
+                let event = capture.poll_event(0);
+                if event == crate::ffi::vfmcap::VFMCAP_EVENT_SOURCE_CHANGE {
+                    info!("AML pipeline: source change event detected");
+                    should_recreate = true;
+                    break;
+                } else if event == crate::ffi::vfmcap::VFMCAP_EVENT_NOSIG {
+                    info!("AML pipeline: signal lost/unstable event detected");
+                    should_recreate = true;
+                    break;
+                }
+
+                if last_signal_check.elapsed() >= Duration::from_millis(250) {
+                    last_signal_check = Instant::now();
+                    let current_signal = sysfs_read_signal();
+                    if signal_metadata_changed(&initial_signal, &current_signal) {
+                        info_signal_change(&initial_signal, &current_signal);
+                        should_recreate = true;
+                        break;
+                    }
+                }
+
+                let capture_result = match capture.next_frame() {
+                    Ok(r) => {
+                        consecutive_timeouts = 0;
+                        consecutive_vulkan_errors = 0;
+                        r
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::TimedOut {
+                            consecutive_timeouts += 1;
+                            if consecutive_timeouts >= CAPTURE_TIMEOUT_STOP_THRESHOLD {
+                                warn!(
+                                    "AML capture timed out {} consecutive times, stopping",
+                                    consecutive_timeouts
+                                );
+                                break;
+                            }
+                        } else if e.kind() == std::io::ErrorKind::NotConnected {
+                            info!("AML pipeline: signal lost during capture, rebuilding after stable signal");
+                            should_recreate = true;
+                            break;
+                        } else if e.to_string().contains("Vulkan")
+                            || e.to_string()
+                                .contains("vfmcap_acquire_frame failed (rc=-5)")
+                        {
+                            consecutive_vulkan_errors += 1;
+                            if consecutive_vulkan_errors >= CAPTURE_VULKAN_ERROR_STOP_THRESHOLD {
+                                warn!(
+                                    "AML capture hit {} consecutive vfmcap/Vulkan errors, rebuilding after stable signal: {}",
+                                    consecutive_vulkan_errors, e
+                                );
+                                should_recreate = true;
+                                break;
+                            }
+                            error!("AML capture error: {}", e);
+                        } else {
+                            error!("AML capture error: {}", e);
+                        }
+                        continue;
+                    }
+                };
+
+                if frame_count == 0 {
+                    if let FrameData::DmaBuf(dma) = &capture_result.frame {
+                        info!(
+                            "AML pipeline: first frame dma fd={} fd2={} w={} h={} bpl={} size={} fmt={:#x} enc={}x{}",
+                            dma.dmabuf_fd, dma.dmabuf_fd2, dma.width, dma.height,
+                            dma.bytesperline, dma.size, dma.format,
+                            encoder_width, encoder_height
+                        );
+                    }
+                }
+
+                if last_signal_check.elapsed() >= Duration::from_millis(500) {
+                    last_signal_check = Instant::now();
+                    let current_signal = sysfs_read_signal();
+                    if signal_metadata_changed(&initial_signal, &current_signal) {
+                        info_signal_change(&initial_signal, &current_signal);
+                        capture.release_frame(&capture_result.frame);
+                        should_recreate = true;
+                        break;
+                    }
+                }
+
+                if capture_result.reconfigured {
+                    let new_res = capture_result.resolution;
+                    info!(
+                        "AML pipeline: source reconfigured to {}x{}, rebuilding capture+encoder",
+                        new_res.width, new_res.height
+                    );
+                    capture.release_frame(&capture_result.frame);
+                    should_recreate = true;
+                    break;
+                }
+
+                if has_subscribers {
+                    match capture_result.frame {
+                        FrameData::DmaBuf(dma) => {
+                            let task = EncodeTask {
+                                index: dma.index,
+                                dmabuf_fd: dma.dmabuf_fd,
+                                dmabuf_fd2: dma.dmabuf_fd2,
+                                width: dma.width,
+                                height: dma.height,
+                                bytesperline: dma.bytesperline,
+                                size: dma.size,
+                                format: dma.format,
+                            };
+                            pending_releases.insert(task.index, dma);
+                            if let Err(e) = frame_tx.send(task) {
+                                warn!("AML encode thread stopped while queueing frame: {}", e);
+                                if let Some(dma) = pending_releases.remove(&task.index) {
+                                    capture.release_frame(&FrameData::DmaBuf(dma));
+                                }
+                                break;
+                            }
+                            frame_count += 1;
+                            fps_frame_count += 1;
+                        }
+                        FrameData::Mapped { .. } => {
+                            error!("AML pipeline received Mapped frame, expected DmaBuf");
+                            continue;
+                        }
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(33));
+                    capture.release_frame(&capture_result.frame);
+                }
+
+                let elapsed = last_fps_time.elapsed();
+                if elapsed >= Duration::from_secs(1) {
+                    let current_fps = fps_frame_count as f32 / elapsed.as_secs_f32();
+                    fps_frame_count = 0;
+                    last_fps_time = Instant::now();
+
+                    let mut s = self.stats.blocking_lock();
+                    s.current_fps = current_fps;
+                }
             }
-        };
 
-        info!(
-            "AML pipeline: encoder created {}x{} @ {}fps codec={:?} img_format={:?}",
-            actual_resolution.width,
-            actual_resolution.height,
-            actual_fps,
-            config.output_codec,
-            img_format
-        );
-        let encoder_width = encoder.width();
-        let encoder_height = encoder.height();
+            encode_active.store(false, Ordering::Release);
+            drop(frame_tx);
+            let _ = encode_handle.join();
 
-        // 4. Generate and broadcast VPS+SPS+PPS header
-        match encoder.generate_header() {
-            Ok(header) => {
-                info!("AML pipeline: generated header ({} bytes)", header.len());
-                let header_frame = Arc::new(EncodedVideoFrame {
-                    data: Bytes::from(header),
-                    pts_ms: 0,
-                    is_keyframe: true,
-                    sequence: 0,
-                    duration: Duration::from_millis(0),
-                    codec: config.output_codec,
-                });
-                self.broadcast_encoded(header_frame);
-            }
-            Err(e) => {
-                warn!("Failed to generate encoder header: {}", e);
-            }
-        }
-
-        // 5. Main capture+encode loop
-        let mut consecutive_timeouts: u32 = 0;
-        let mut frame_count: u64 = 0;
-        let mut fps_frame_count: u64 = 0;
-        let mut last_fps_time = Instant::now();
-        let mut last_signal_check = Instant::now();
-
-        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<EncodeTask>(8);
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<u32>();
-        let encode_active = Arc::new(AtomicBool::new(true));
-        let mut pending_releases: HashMap<u32, DmaBufFrame> = HashMap::new();
-        let encode_handle = {
-            let pipeline = self.clone();
-            let encode_active = encode_active.clone();
-            let codec = config.output_codec;
-            std::thread::spawn(move || {
-                Self::run_encode_thread(
-                    pipeline,
-                    encoder,
-                    frame_rx,
-                    release_tx,
-                    encode_active,
-                    codec,
-                    actual_fps,
-                );
-            })
-        };
-
-        let mut last_subscriber_log = Instant::now();
-        while self.running_flag.load(Ordering::Acquire) {
             while let Ok(index) = release_rx.try_recv() {
                 if let Some(dma) = pending_releases.remove(&index) {
                     capture.release_frame(&FrameData::DmaBuf(dma));
                 }
             }
-
-            let sub_count = self.subscriber_count();
-            let has_subscribers = sub_count > 0;
-            if !has_subscribers {
-                if last_subscriber_log.elapsed() >= Duration::from_secs(5) {
-                    info!("AML pipeline: no subscribers, capturing but not encoding");
-                    last_subscriber_log = Instant::now();
-                }
+            for (_, dma) in pending_releases.drain() {
+                capture.release_frame(&FrameData::DmaBuf(dma));
             }
 
-            // --- Signal change event polling ---
-            // Check for source change events between frames.
-            // Actual encoder recreation happens when next_frame returns reconfigured=true.
-            let event = capture.poll_event(0);
-            if event == crate::ffi::vfmcap::VFMCAP_EVENT_SOURCE_CHANGE {
-                info!(
-                    "AML pipeline: source change event detected, waiting for reconfigured frame..."
-                );
-            } else if event == crate::ffi::vfmcap::VFMCAP_EVENT_NOSIG {
-                trace!("AML pipeline: no signal");
+            drop(capture);
+            info!(
+                "AML pipeline: capture closed (Vulkan resources released), encoded {} frames",
+                frame_count
+            );
+
+            if !should_recreate {
+                break 'outer;
             }
 
-            let capture_result = match capture.next_frame() {
-                Ok(r) => {
-                    consecutive_timeouts = 0;
-                    r
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::TimedOut {
-                        consecutive_timeouts += 1;
-                        if consecutive_timeouts >= CAPTURE_TIMEOUT_STOP_THRESHOLD {
-                            warn!(
-                                "AML capture timed out {} consecutive times, stopping",
-                                consecutive_timeouts
-                            );
-                            break;
-                        }
-                    } else if e.kind() == std::io::ErrorKind::NotConnected {
-                        trace!("AML: no signal");
-                        std::thread::sleep(Duration::from_millis(100));
-                    } else {
-                        error!("AML capture error: {}", e);
+            let target_res = match wait_for_stable_signal_sysfs(config, &self.running_flag) {
+                Some(res) => res,
+                None => {
+                    if self.running_flag.load(Ordering::Acquire) {
+                        error!("AML pipeline: signal never stabilized after reconfiguration");
                     }
-                    continue;
+                    break 'outer;
                 }
             };
 
-            if frame_count == 0 {
-                if let FrameData::DmaBuf(dma) = &capture_result.frame {
-                    info!(
-                        "AML pipeline: first frame dma fd={} fd2={} w={} h={} bpl={} size={} fmt={:#x} enc={}x{}",
-                        dma.dmabuf_fd, dma.dmabuf_fd2, dma.width, dma.height,
-                        dma.bytesperline, dma.size, dma.format,
-                        encoder_width, encoder_height
-                    );
-                }
-            }
-
-            if last_signal_check.elapsed() >= Duration::from_millis(500) {
-                last_signal_check = Instant::now();
-                let current_signal = sysfs_read_signal();
-                if current_signal.hdr_status != initial_signal.hdr_status
-                    || current_signal.bitdepth != initial_signal.bitdepth
-                    || current_signal.signal_type != initial_signal.signal_type
-                {
-                    info!(
-                        "AML pipeline: HDMI signal changed, stopping for rebuild (hdr {}->{}, bitdepth {}->{}, signal_type {:#x}->{:#x}, eotf {}->{})",
-                        initial_signal.hdr_status,
-                        current_signal.hdr_status,
-                        initial_signal.bitdepth,
-                        current_signal.bitdepth,
-                        initial_signal.signal_type,
-                        current_signal.signal_type,
-                        initial_signal.hdr_eotf,
-                        current_signal.hdr_eotf
-                    );
-                    capture.release_frame(&capture_result.frame);
-                    break;
-                }
-            }
-
-            // Handle reconfiguration
-            if capture_result.reconfigured {
-                let new_res = capture_result.resolution;
-                info!(
-                    "AML pipeline: source reconfigured to {}x{}, stopping for rebuild",
-                    new_res.width, new_res.height
-                );
-                capture.release_frame(&capture_result.frame);
-                break;
-            }
-
-            if has_subscribers {
-                match capture_result.frame {
-                    FrameData::DmaBuf(dma) => {
-                        let task = EncodeTask {
-                            index: dma.index,
-                            dmabuf_fd: dma.dmabuf_fd,
-                            dmabuf_fd2: dma.dmabuf_fd2,
-                            width: dma.width,
-                            height: dma.height,
-                            bytesperline: dma.bytesperline,
-                            size: dma.size,
-                            format: dma.format,
-                        };
-                        pending_releases.insert(task.index, dma);
-                        if let Err(e) = frame_tx.send(task) {
-                            warn!("AML encode thread stopped while queueing frame: {}", e);
-                            if let Some(dma) = pending_releases.remove(&task.index) {
-                                capture.release_frame(&FrameData::DmaBuf(dma));
-                            }
-                            break;
-                        }
-                        frame_count += 1;
-                        fps_frame_count += 1;
-                    }
-                    FrameData::Mapped { .. } => {
-                        error!("AML pipeline received Mapped frame, expected DmaBuf");
-                        continue;
-                    }
-                }
-            } else {
-                // No subscribers: release frame without encoding to keep vdin alive.
-                // Throttle to ~30fps to avoid draining the backlog too quickly,
-                // which can cause vfmcap/vdin to stop producing frames.
-                std::thread::sleep(Duration::from_millis(33));
-                capture.release_frame(&capture_result.frame);
-            }
-
-            // FPS tracking
-            let elapsed = last_fps_time.elapsed();
-            if elapsed >= Duration::from_secs(1) {
-                let current_fps = fps_frame_count as f32 / elapsed.as_secs_f32();
-                fps_frame_count = 0;
-                last_fps_time = Instant::now();
-
-                let mut s = self.stats.blocking_lock();
-                s.current_fps = current_fps;
-            }
-        }
-
-        encode_active.store(false, Ordering::Release);
-        drop(frame_tx);
-        let _ = encode_handle.join();
-
-        while let Ok(index) = release_rx.try_recv() {
-            if let Some(dma) = pending_releases.remove(&index) {
-                capture.release_frame(&FrameData::DmaBuf(dma));
-            }
-        }
-        for (_, dma) in pending_releases.drain() {
-            capture.release_frame(&FrameData::DmaBuf(dma));
+            info!(
+                "AML pipeline: rebuilding for {}x{}",
+                target_res.width, target_res.height
+            );
         }
 
         self.running_flag.store(false, Ordering::Release);
         let _ = self.running.send(false);
-        info!("AML pipeline stopped (encoded {} frames)", frame_count);
+        info!("AML pipeline stopped");
+    }
+}
+
+fn wait_for_stable_signal_sysfs(
+    config: &AmlPipelineConfig,
+    running_flag: &AtomicBool,
+) -> Option<Resolution> {
+    const STABILITY_CHECK_COUNT: u32 = 3;
+    const STABILITY_CHECK_INTERVAL_MS: u64 = 500;
+    const MAX_WAIT_SECS: u64 = 30;
+
+    let start = Instant::now();
+    let mut stable_count: u32 = 0;
+    let mut last_w: u32 = 0;
+    let mut last_h: u32 = 0;
+
+    info!(
+        "AML pipeline: waiting for stable HDMI signal via sysfs (up to {}s, need {} identical readings)",
+        MAX_WAIT_SECS, STABILITY_CHECK_COUNT
+    );
+
+    loop {
+        if !running_flag.load(Ordering::Acquire) {
+            info!("AML pipeline: stopping during signal stability wait");
+            return None;
+        }
+
+        if start.elapsed().as_secs() >= MAX_WAIT_SECS {
+            warn!(
+                "AML pipeline: signal stability timed out after {}s",
+                MAX_WAIT_SECS
+            );
+            return None;
+        }
+
+        match sysfs_read_resolution() {
+            Some((w, h)) => {
+                if w == last_w && h == last_h {
+                    stable_count += 1;
+                    info!(
+                        "AML pipeline: signal stable {}/{} ({}x{})",
+                        stable_count, STABILITY_CHECK_COUNT, w, h
+                    );
+                } else {
+                    if last_w > 0 {
+                        info!(
+                            "AML pipeline: signal changed {}x{} -> {}x{}, resetting stability counter",
+                            last_w, last_h, w, h
+                        );
+                    }
+                    last_w = w;
+                    last_h = h;
+                    stable_count = 1;
+                }
+
+                if stable_count >= STABILITY_CHECK_COUNT {
+                    let target_w = if config.max_width > 0 && last_w > config.max_width {
+                        config.max_width
+                    } else {
+                        last_w
+                    };
+                    let target_h = if config.max_height > 0 && last_h > config.max_height {
+                        config.max_height
+                    } else {
+                        last_h
+                    };
+                    info!(
+                        "AML pipeline: signal stable at {}x{} (target {}x{}) after {:.1}s",
+                        last_w,
+                        last_h,
+                        target_w,
+                        target_h,
+                        start.elapsed().as_secs_f32()
+                    );
+                    return Some(Resolution::new(target_w, target_h));
+                }
+            }
+            None => {
+                trace!("AML pipeline: sysfs signal_info not available or zero resolution");
+                stable_count = 0;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(STABILITY_CHECK_INTERVAL_MS));
     }
 }
 

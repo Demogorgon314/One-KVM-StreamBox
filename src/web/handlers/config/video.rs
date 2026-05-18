@@ -30,6 +30,14 @@ pub async fn update_video_config(
 
     let new_video_config = state.config.get().video.clone();
 
+    #[cfg(feature = "aml")]
+    crate::hdmi_rx_edid::sync_from_video_config(
+        new_video_config.width,
+        new_video_config.height,
+        new_video_config.fps,
+    )
+    .await;
+
     apply_video_config(
         &state,
         &old_video_config,

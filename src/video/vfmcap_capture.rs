@@ -90,6 +90,19 @@ impl VfmcapStream {
         }
     }
 
+    pub fn set_output_layout(&mut self, layout: VfmcapOutputLayout) -> Result<()> {
+        let rc = unsafe { vfmcap_set_output_layout(self.ctx, layout) };
+        if rc == VFMCAP_OK {
+            Ok(())
+        } else {
+            Err(AppError::VideoError(format!(
+                "vfmcap_set_output_layout failed (rc={}): {}",
+                rc,
+                self.last_error()
+            )))
+        }
+    }
+
     pub fn stop(&mut self) {
         if self.started {
             unsafe { vfmcap_stop(self.ctx) };
@@ -201,6 +214,7 @@ impl AmlVfmcapCaptureStream {
         };
 
         let mut inner = VfmcapStream::open(device, &config)?;
+        configure_output_layout(&mut inner, output_format)?;
         inner.start(num_buffers)?;
 
         if output_format == VfmcapOutputFmt::Nv12 && color_mode == VfmcapColorMode::Passthrough {
@@ -219,6 +233,7 @@ impl AmlVfmcapCaptureStream {
                     inner.stop();
                     config.color_mode = detected_color_mode;
                     inner = VfmcapStream::open(device, &config)?;
+                    configure_output_layout(&mut inner, output_format)?;
                     inner.start(num_buffers)?;
                 }
             }
@@ -255,6 +270,20 @@ impl AmlVfmcapCaptureStream {
             self.inner.release_acquired_frame(&mut frame);
         }
     }
+}
+
+fn configure_output_layout(
+    stream: &mut VfmcapStream,
+    output_format: VfmcapOutputFmt,
+) -> Result<()> {
+    match output_format {
+        VfmcapOutputFmt::Nv12 | VfmcapOutputFmt::Nv21 | VfmcapOutputFmt::P010 => {
+            stream.set_output_layout(VfmcapOutputLayout::TwoDmaBuf)?;
+            info!("vfmcap output layout: two DMA-buf planes");
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 impl CaptureStream for AmlVfmcapCaptureStream {

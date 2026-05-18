@@ -10,6 +10,8 @@ pub mod events;
 pub mod extensions;
 #[cfg(feature = "aml")]
 pub mod ffi;
+#[cfg(feature = "aml")]
+pub mod hdmi_rx_edid;
 pub mod hid;
 pub mod msd;
 pub mod otg;

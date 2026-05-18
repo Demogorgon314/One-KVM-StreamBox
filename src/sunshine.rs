@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use aes::cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
+use aes_gcm::aead::{AeadInPlace, KeyInit as AeadKeyInit};
+use aes_gcm::{Aes128Gcm, Nonce, Tag};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -31,6 +33,10 @@ use x509_parser::prelude::parse_x509_certificate;
 
 use crate::config::{RtspCodec, RtspConfig, SunshineConfig};
 use crate::error::{AppError, Result};
+use crate::hid::{
+    CanonicalKey, HidController, KeyEventType, KeyboardEvent, KeyboardModifiers, MouseButton,
+    MouseEvent, MouseEventType,
+};
 use crate::video::encoder::VideoEncoderType;
 use crate::video::shared_video_pipeline::EncodedVideoFrame;
 use crate::video::VideoStreamManager;
@@ -56,6 +62,15 @@ const GAMESTREAM_MAX_FPS: u32 = 60;
 const GAMESTREAM_STARTUP_KEYFRAME_INTERVAL_FRAMES: u64 = 30;
 const GAMESTREAM_STARTUP_KEYFRAME_REQUESTS: u64 = 3;
 const GAMESTREAM_VIDEO_PACE_BATCH_PACKETS: usize = 24;
+const GAMESTREAM_PACKET_INPUT_DATA: u16 = 0x0206;
+const GAMESTREAM_PACKET_ENCRYPTED: u16 = 0x0001;
+const GAMESTREAM_INPUT_KEY_DOWN: u32 = 0x0000_0003;
+const GAMESTREAM_INPUT_KEY_UP: u32 = 0x0000_0004;
+const GAMESTREAM_INPUT_MOUSE_ABS: u32 = 0x0000_0005;
+const GAMESTREAM_INPUT_MOUSE_REL_GEN5: u32 = 0x0000_0007;
+const GAMESTREAM_INPUT_MOUSE_BUTTON_DOWN_GEN5: u32 = 0x0000_0008;
+const GAMESTREAM_INPUT_MOUSE_BUTTON_UP_GEN5: u32 = 0x0000_0009;
+const GAMESTREAM_INPUT_SCROLL_GEN5: u32 = 0x0000_000a;
 const RTSP_BUF_SIZE: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +127,7 @@ struct SunshineRuntime {
     config: SunshineConfig,
     rtsp: RtspConfig,
     video_manager: Arc<VideoStreamManager>,
+    hid: Arc<HidController>,
     paths: SunshinePaths,
     unique_id: String,
     cert_pem: String,
@@ -137,6 +153,7 @@ struct GameStreamLaunchSession {
     codec: RtspCodec,
     av_ping_payload: String,
     control_connect_data: u32,
+    gcm_key: Option<[u8; 16]>,
     video_client: Option<SocketAddr>,
     video_packet_size: usize,
 }
@@ -154,6 +171,7 @@ pub struct SunshineService {
     rtsp: RtspConfig,
     data_dir: PathBuf,
     video_manager: Arc<VideoStreamManager>,
+    hid: Arc<HidController>,
     runtime: Arc<RwLock<Option<Arc<SunshineRuntime>>>>,
     status: Arc<RwLock<SunshineServiceStatus>>,
     shutdown_tx: broadcast::Sender<()>,
@@ -166,6 +184,7 @@ impl SunshineService {
         rtsp: RtspConfig,
         data_dir: PathBuf,
         video_manager: Arc<VideoStreamManager>,
+        hid: Arc<HidController>,
     ) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         Self {
@@ -173,6 +192,7 @@ impl SunshineService {
             rtsp,
             data_dir,
             video_manager,
+            hid,
             runtime: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(SunshineServiceStatus::Stopped)),
             shutdown_tx,
@@ -195,6 +215,7 @@ impl SunshineService {
                 self.config.clone(),
                 self.rtsp.clone(),
                 self.video_manager.clone(),
+                self.hid.clone(),
                 &self.data_dir,
             )
             .await?,
@@ -326,6 +347,7 @@ impl SunshineRuntime {
         config: SunshineConfig,
         rtsp: RtspConfig,
         video_manager: Arc<VideoStreamManager>,
+        hid: Arc<HidController>,
         data_dir: &Path,
     ) -> Result<Self> {
         let paths = SunshinePaths::new(data_dir);
@@ -342,6 +364,7 @@ impl SunshineRuntime {
             config,
             rtsp,
             video_manager,
+            hid,
             paths,
             unique_id: state.unique_id,
             cert_pem,
@@ -810,6 +833,7 @@ async fn launch(
         codec: runtime.rtsp.codec.clone(),
         av_ping_payload: hex_encode(&random_bytes(8)),
         control_connect_data: rand::rng().random(),
+        gcm_key: parse_gamestream_gcm_key(query.get("rikey").map(String::as_str).unwrap_or("")),
         video_client: None,
         video_packet_size: GAMESTREAM_DEFAULT_VIDEO_PACKET_SIZE,
     };
@@ -1022,7 +1046,12 @@ async fn spawn_gamestream_control_enet(
                     channel_id,
                     packet,
                 })) => {
-                    log_gamestream_control_packet(peer.address(), channel_id, packet.data());
+                    futures::executor::block_on(handle_gamestream_control_packet(
+                        runtime.clone(),
+                        peer.address(),
+                        channel_id,
+                        packet.data(),
+                    ));
                 }
                 Ok(None) => {
                     std::thread::sleep(Duration::from_millis(2));
@@ -1036,18 +1065,55 @@ async fn spawn_gamestream_control_enet(
     }))
 }
 
-fn log_gamestream_control_packet(peer: Option<SocketAddr>, channel_id: u8, data: &[u8]) {
+async fn handle_gamestream_control_packet(
+    runtime: Arc<SunshineRuntime>,
+    peer: Option<SocketAddr>,
+    channel_id: u8,
+    data: &[u8],
+) {
     if data.len() >= 8 && u16::from_le_bytes([data[0], data[1]]) == 0x0001 {
         let packet_len = u16::from_le_bytes([data[2], data[3]]);
         let seq = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        tracing::debug!(
-            peer = ?peer,
-            channel_id,
-            packet_len,
-            seq,
-            bytes = data.len(),
-            "Moonlight GameStream encrypted control packet"
-        );
+        match decrypt_gamestream_control_packet(&runtime, data) {
+            Some(plaintext) => {
+                if plaintext.len() < 4 {
+                    tracing::warn!(
+                        peer = ?peer,
+                        channel_id,
+                        packet_len,
+                        seq,
+                        bytes = plaintext.len(),
+                        "Moonlight GameStream decrypted runt control packet"
+                    );
+                    return;
+                }
+                let packet_type = u16::from_le_bytes([plaintext[0], plaintext[1]]);
+                let payload = &plaintext[4..];
+                if packet_type == GAMESTREAM_PACKET_INPUT_DATA {
+                    handle_gamestream_input_payload(&runtime, payload).await;
+                } else {
+                    tracing::debug!(
+                        peer = ?peer,
+                        channel_id,
+                        packet_len,
+                        seq,
+                        packet_type = format!("{packet_type:#06x}"),
+                        payload_bytes = payload.len(),
+                        "Moonlight GameStream decrypted control packet"
+                    );
+                }
+            }
+            None => {
+                tracing::warn!(
+                    peer = ?peer,
+                    channel_id,
+                    packet_len,
+                    seq,
+                    bytes = data.len(),
+                    "Moonlight GameStream encrypted control decrypt failed"
+                );
+            }
+        }
         return;
     }
 
@@ -1061,6 +1127,316 @@ fn log_gamestream_control_packet(peer: Option<SocketAddr>, channel_id: u8, data:
         bytes = data.len(),
         "Moonlight GameStream control packet"
     );
+}
+
+fn decrypt_gamestream_control_packet(runtime: &SunshineRuntime, data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 8 + 16 {
+        return None;
+    }
+    let packet_type = u16::from_le_bytes([data[0], data[1]]);
+    if packet_type != GAMESTREAM_PACKET_ENCRYPTED {
+        return None;
+    }
+    let length = u16::from_le_bytes([data[2], data[3]]) as usize;
+    let seq = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    if length < 20 || data.len() < 4 + length {
+        return None;
+    }
+    let key = runtime
+        .launch_session
+        .blocking_lock()
+        .as_ref()
+        .and_then(|session| session.gcm_key)?;
+    let tagged_cipher = &data[8..4 + length];
+    if tagged_cipher.len() < 16 {
+        return None;
+    }
+    let tag = Tag::from_slice(&tagged_cipher[..16]);
+    let mut ciphertext = tagged_cipher[16..].to_vec();
+    let cipher = Aes128Gcm::new_from_slice(&key).ok()?;
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[..4].copy_from_slice(&seq.to_le_bytes());
+    nonce_bytes[10] = b'C';
+    nonce_bytes[11] = b'C';
+    cipher
+        .decrypt_in_place_detached(Nonce::from_slice(&nonce_bytes), b"", &mut ciphertext, tag)
+        .ok()?;
+    Some(ciphertext)
+}
+
+async fn handle_gamestream_input_payload(runtime: &SunshineRuntime, payload: &[u8]) {
+    match parse_gamestream_input_event(payload) {
+        Some(GameStreamInputEvent::Keyboard(event)) => {
+            if let Err(e) = runtime.hid.send_keyboard(event).await {
+                tracing::warn!("Moonlight GameStream keyboard HID failed: {}", e);
+            }
+        }
+        Some(GameStreamInputEvent::Mouse(event)) => {
+            if let Err(e) = runtime.hid.send_mouse(event).await {
+                tracing::warn!("Moonlight GameStream mouse HID failed: {}", e);
+            }
+        }
+        None => {
+            let magic = payload
+                .get(4..8)
+                .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+            tracing::debug!(
+                magic = ?magic.map(|value| format!("{value:#010x}")),
+                bytes = payload.len(),
+                "Moonlight GameStream ignored input packet"
+            );
+        }
+    }
+}
+
+enum GameStreamInputEvent {
+    Keyboard(KeyboardEvent),
+    Mouse(MouseEvent),
+}
+
+fn parse_gamestream_input_event(payload: &[u8]) -> Option<GameStreamInputEvent> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let declared_size =
+        u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+    if declared_size + 4 > payload.len() {
+        return None;
+    }
+    let magic = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    match magic {
+        GAMESTREAM_INPUT_KEY_DOWN | GAMESTREAM_INPUT_KEY_UP => {
+            if payload.len() < 14 {
+                return None;
+            }
+            let key_code = u16::from_le_bytes([payload[9], payload[10]]);
+            let key = gamestream_vk_to_canonical_key(key_code & 0x00ff)?;
+            let event_type = if magic == GAMESTREAM_INPUT_KEY_DOWN {
+                KeyEventType::Down
+            } else {
+                KeyEventType::Up
+            };
+            Some(GameStreamInputEvent::Keyboard(KeyboardEvent {
+                event_type,
+                key,
+                modifiers: gamestream_modifiers(payload[11]),
+            }))
+        }
+        GAMESTREAM_INPUT_MOUSE_REL_GEN5 => {
+            if payload.len() < 12 {
+                return None;
+            }
+            let dx = i16::from_be_bytes([payload[8], payload[9]]) as i32;
+            let dy = i16::from_be_bytes([payload[10], payload[11]]) as i32;
+            Some(GameStreamInputEvent::Mouse(MouseEvent::move_rel(dx, dy)))
+        }
+        GAMESTREAM_INPUT_MOUSE_ABS => {
+            if payload.len() < 18 {
+                return None;
+            }
+            let x = i16::from_be_bytes([payload[8], payload[9]]) as i32;
+            let y = i16::from_be_bytes([payload[10], payload[11]]) as i32;
+            let width = i16::from_be_bytes([payload[14], payload[15]]) as i32;
+            let height = i16::from_be_bytes([payload[16], payload[17]]) as i32;
+            let x = scale_gamestream_abs_coord(x, width);
+            let y = scale_gamestream_abs_coord(y, height);
+            Some(GameStreamInputEvent::Mouse(MouseEvent::move_abs(x, y)))
+        }
+        GAMESTREAM_INPUT_MOUSE_BUTTON_DOWN_GEN5 | GAMESTREAM_INPUT_MOUSE_BUTTON_UP_GEN5 => {
+            if payload.len() < 9 {
+                return None;
+            }
+            let button = gamestream_mouse_button(payload[8])?;
+            let event_type = if magic == GAMESTREAM_INPUT_MOUSE_BUTTON_DOWN_GEN5 {
+                MouseEventType::Down
+            } else {
+                MouseEventType::Up
+            };
+            Some(GameStreamInputEvent::Mouse(MouseEvent {
+                event_type,
+                x: 0,
+                y: 0,
+                button: Some(button),
+                scroll: 0,
+            }))
+        }
+        GAMESTREAM_INPUT_SCROLL_GEN5 => {
+            if payload.len() < 14 {
+                return None;
+            }
+            let amount = i16::from_be_bytes([payload[8], payload[9]]);
+            Some(GameStreamInputEvent::Mouse(MouseEvent {
+                event_type: MouseEventType::Scroll,
+                x: 0,
+                y: 0,
+                button: None,
+                scroll: gamestream_scroll_delta(amount),
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn parse_gamestream_gcm_key(value: &str) -> Option<[u8; 16]> {
+    let bytes = hex_decode(value).ok()?;
+    bytes.as_slice().try_into().ok()
+}
+
+fn gamestream_modifiers(modifiers: u8) -> KeyboardModifiers {
+    KeyboardModifiers {
+        left_ctrl: modifiers & 0x01 != 0,
+        left_alt: modifiers & 0x02 != 0,
+        left_shift: modifiers & 0x04 != 0,
+        left_meta: modifiers & 0x08 != 0,
+        ..Default::default()
+    }
+}
+
+fn scale_gamestream_abs_coord(value: i32, max_value: i32) -> i32 {
+    if max_value <= 0 {
+        return value.clamp(0, 32767);
+    }
+    ((value.clamp(0, max_value) as i64 * 32767) / max_value as i64) as i32
+}
+
+fn gamestream_scroll_delta(amount: i16) -> i8 {
+    let detents = if amount.unsigned_abs() >= 120 {
+        amount / 120
+    } else {
+        amount.signum()
+    };
+    detents.clamp(i8::MIN as i16, i8::MAX as i16) as i8
+}
+
+fn gamestream_mouse_button(button: u8) -> Option<MouseButton> {
+    match button {
+        0x01 => Some(MouseButton::Left),
+        0x02 => Some(MouseButton::Middle),
+        0x03 => Some(MouseButton::Right),
+        0x04 => Some(MouseButton::Back),
+        0x05 => Some(MouseButton::Forward),
+        _ => None,
+    }
+}
+
+fn gamestream_vk_to_canonical_key(vk: u16) -> Option<CanonicalKey> {
+    match vk {
+        0x08 => Some(CanonicalKey::Backspace),
+        0x09 => Some(CanonicalKey::Tab),
+        0x0d => Some(CanonicalKey::Enter),
+        0x10 | 0xa0 => Some(CanonicalKey::ShiftLeft),
+        0xa1 => Some(CanonicalKey::ShiftRight),
+        0x11 | 0xa2 => Some(CanonicalKey::ControlLeft),
+        0xa3 => Some(CanonicalKey::ControlRight),
+        0x12 | 0xa4 => Some(CanonicalKey::AltLeft),
+        0xa5 => Some(CanonicalKey::AltRight),
+        0x14 => Some(CanonicalKey::CapsLock),
+        0x1b => Some(CanonicalKey::Escape),
+        0x20 => Some(CanonicalKey::Space),
+        0x21 => Some(CanonicalKey::PageUp),
+        0x22 => Some(CanonicalKey::PageDown),
+        0x23 => Some(CanonicalKey::End),
+        0x24 => Some(CanonicalKey::Home),
+        0x25 => Some(CanonicalKey::ArrowLeft),
+        0x26 => Some(CanonicalKey::ArrowUp),
+        0x27 => Some(CanonicalKey::ArrowRight),
+        0x28 => Some(CanonicalKey::ArrowDown),
+        0x2c => Some(CanonicalKey::PrintScreen),
+        0x2d => Some(CanonicalKey::Insert),
+        0x2e => Some(CanonicalKey::Delete),
+        0x30 => Some(CanonicalKey::Digit0),
+        0x31 => Some(CanonicalKey::Digit1),
+        0x32 => Some(CanonicalKey::Digit2),
+        0x33 => Some(CanonicalKey::Digit3),
+        0x34 => Some(CanonicalKey::Digit4),
+        0x35 => Some(CanonicalKey::Digit5),
+        0x36 => Some(CanonicalKey::Digit6),
+        0x37 => Some(CanonicalKey::Digit7),
+        0x38 => Some(CanonicalKey::Digit8),
+        0x39 => Some(CanonicalKey::Digit9),
+        0x41 => Some(CanonicalKey::KeyA),
+        0x42 => Some(CanonicalKey::KeyB),
+        0x43 => Some(CanonicalKey::KeyC),
+        0x44 => Some(CanonicalKey::KeyD),
+        0x45 => Some(CanonicalKey::KeyE),
+        0x46 => Some(CanonicalKey::KeyF),
+        0x47 => Some(CanonicalKey::KeyG),
+        0x48 => Some(CanonicalKey::KeyH),
+        0x49 => Some(CanonicalKey::KeyI),
+        0x4a => Some(CanonicalKey::KeyJ),
+        0x4b => Some(CanonicalKey::KeyK),
+        0x4c => Some(CanonicalKey::KeyL),
+        0x4d => Some(CanonicalKey::KeyM),
+        0x4e => Some(CanonicalKey::KeyN),
+        0x4f => Some(CanonicalKey::KeyO),
+        0x50 => Some(CanonicalKey::KeyP),
+        0x51 => Some(CanonicalKey::KeyQ),
+        0x52 => Some(CanonicalKey::KeyR),
+        0x53 => Some(CanonicalKey::KeyS),
+        0x54 => Some(CanonicalKey::KeyT),
+        0x55 => Some(CanonicalKey::KeyU),
+        0x56 => Some(CanonicalKey::KeyV),
+        0x57 => Some(CanonicalKey::KeyW),
+        0x58 => Some(CanonicalKey::KeyX),
+        0x59 => Some(CanonicalKey::KeyY),
+        0x5a => Some(CanonicalKey::KeyZ),
+        0x5b => Some(CanonicalKey::MetaLeft),
+        0x5c => Some(CanonicalKey::MetaRight),
+        0x5d => Some(CanonicalKey::ContextMenu),
+        0x60 => Some(CanonicalKey::Numpad0),
+        0x61 => Some(CanonicalKey::Numpad1),
+        0x62 => Some(CanonicalKey::Numpad2),
+        0x63 => Some(CanonicalKey::Numpad3),
+        0x64 => Some(CanonicalKey::Numpad4),
+        0x65 => Some(CanonicalKey::Numpad5),
+        0x66 => Some(CanonicalKey::Numpad6),
+        0x67 => Some(CanonicalKey::Numpad7),
+        0x68 => Some(CanonicalKey::Numpad8),
+        0x69 => Some(CanonicalKey::Numpad9),
+        0x6a => Some(CanonicalKey::NumpadMultiply),
+        0x6b => Some(CanonicalKey::NumpadAdd),
+        0x6d => Some(CanonicalKey::NumpadSubtract),
+        0x6e => Some(CanonicalKey::NumpadDecimal),
+        0x6f => Some(CanonicalKey::NumpadDivide),
+        0x70 => Some(CanonicalKey::F1),
+        0x71 => Some(CanonicalKey::F2),
+        0x72 => Some(CanonicalKey::F3),
+        0x73 => Some(CanonicalKey::F4),
+        0x74 => Some(CanonicalKey::F5),
+        0x75 => Some(CanonicalKey::F6),
+        0x76 => Some(CanonicalKey::F7),
+        0x77 => Some(CanonicalKey::F8),
+        0x78 => Some(CanonicalKey::F9),
+        0x79 => Some(CanonicalKey::F10),
+        0x7a => Some(CanonicalKey::F11),
+        0x7b => Some(CanonicalKey::F12),
+        0x7c => Some(CanonicalKey::F13),
+        0x7d => Some(CanonicalKey::F14),
+        0x7e => Some(CanonicalKey::F15),
+        0x7f => Some(CanonicalKey::F16),
+        0x80 => Some(CanonicalKey::F17),
+        0x81 => Some(CanonicalKey::F18),
+        0x82 => Some(CanonicalKey::F19),
+        0x83 => Some(CanonicalKey::F20),
+        0x84 => Some(CanonicalKey::F21),
+        0x85 => Some(CanonicalKey::F22),
+        0x86 => Some(CanonicalKey::F23),
+        0x87 => Some(CanonicalKey::F24),
+        0x90 => Some(CanonicalKey::NumLock),
+        0x91 => Some(CanonicalKey::ScrollLock),
+        0xba => Some(CanonicalKey::Semicolon),
+        0xbb => Some(CanonicalKey::Equal),
+        0xbc => Some(CanonicalKey::Comma),
+        0xbd => Some(CanonicalKey::Minus),
+        0xbe => Some(CanonicalKey::Period),
+        0xbf => Some(CanonicalKey::Slash),
+        0xc0 => Some(CanonicalKey::Backquote),
+        0xdb => Some(CanonicalKey::BracketLeft),
+        0xdc => Some(CanonicalKey::Backslash),
+        0xdd => Some(CanonicalKey::BracketRight),
+        0xde => Some(CanonicalKey::Quote),
+        _ => None,
+    }
 }
 
 async fn handle_gamestream_rtsp_client(

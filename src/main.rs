@@ -136,6 +136,14 @@ async fn main() -> anyhow::Result<()> {
     config_store.load().await?;
     let mut config = (*config_store.get()).clone();
 
+    #[cfg(feature = "aml")]
+    one_kvm::hdmi_rx_edid::sync_from_video_config(
+        config.video.width,
+        config.video.height,
+        config.video.fps,
+    )
+    .await;
+
     let mut msd_dir_updated = false;
     if config.msd.msd_dir.trim().is_empty() {
         let msd_dir = data_dir.join("msd");
@@ -555,6 +563,7 @@ async fn main() -> anyhow::Result<()> {
             config.rtsp.clone(),
             data_dir.clone(),
             stream_manager.clone(),
+            hid.clone(),
         )))
     } else {
         tracing::info!("Sunshine-compatible NVHTTP disabled in configuration");

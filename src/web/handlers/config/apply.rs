@@ -513,6 +513,7 @@ pub async fn apply_sunshine_config(
                 state.config.get().rtsp.clone(),
                 state.data_dir().clone(),
                 state.stream_manager.clone(),
+                state.hid.clone(),
             );
             service.start().await.map_err(|e| {
                 AppError::Config(format!("Failed to start Sunshine service: {}", e))
@@ -528,6 +529,7 @@ pub async fn apply_sunshine_config(
                 state.config.get().rtsp.clone(),
                 state.data_dir().clone(),
                 state.stream_manager.clone(),
+                state.hid.clone(),
             );
             service.start().await.map_err(|e| {
                 AppError::Config(format!("Failed to restart Sunshine service: {}", e))

@@ -338,8 +338,25 @@ impl VideoStreamManager {
     }
 
     async fn sync_webrtc_capture_source(&self, reason: &str) {
-        let (device_path, resolution, format, fps, jpeg_quality) =
+        let (device_path, mut resolution, format, fps, jpeg_quality) =
             self.streamer.current_capture_config().await;
+        if device_path
+            .as_ref()
+            .is_some_and(|path| path.to_string_lossy() == "/dev/video_cap")
+        {
+            if let Some(sysfs_resolution) = crate::video::aml_pipeline::sysfs_current_resolution() {
+                if sysfs_resolution != resolution {
+                    info!(
+                        "Using HDMI RX sysfs resolution for WebRTC sync: {}x{} -> {}x{}",
+                        resolution.width,
+                        resolution.height,
+                        sysfs_resolution.width,
+                        sysfs_resolution.height
+                    );
+                    resolution = sysfs_resolution;
+                }
+            }
+        }
         let hdr_mode = self
             .config_store
             .read()
