@@ -8,6 +8,8 @@ use super::{
 };
 use crate::error::{AppError, Result};
 use crate::video::format::{PixelFormat, Resolution};
+#[cfg(feature = "aml")]
+use crate::{ffi::multienc::VlImgFormat, video::encoder::aml_venc::AmlVencEncoder};
 
 const SELF_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_CHECK_FRAME_ATTEMPTS: u64 = 3;
@@ -226,12 +228,73 @@ fn run_smoke_test(
     resolution: Resolution,
     codec_name_ffmpeg: &str,
 ) -> Result<()> {
+    #[cfg(feature = "aml")]
+    {
+        let _ = codec_name_ffmpeg;
+        return run_aml_smoke_test(codec, resolution);
+    }
+
+    #[cfg(not(feature = "aml"))]
     match codec {
         VideoEncoderType::H264 => run_h264_smoke_test(resolution, codec_name_ffmpeg),
         VideoEncoderType::H265 => run_h265_smoke_test(resolution, codec_name_ffmpeg),
         VideoEncoderType::VP8 => run_vp8_smoke_test(resolution, codec_name_ffmpeg),
         VideoEncoderType::VP9 => run_vp9_smoke_test(resolution, codec_name_ffmpeg),
     }
+}
+
+#[cfg(feature = "aml")]
+fn run_aml_smoke_test(codec: VideoEncoderType, resolution: Resolution) -> Result<()> {
+    match codec {
+        VideoEncoderType::H264 => run_aml_venc_smoke_test(codec, resolution),
+        VideoEncoderType::H265 => run_aml_venc_smoke_test(codec, resolution),
+        VideoEncoderType::VP8 | VideoEncoderType::VP9 => Err(AppError::VideoError(format!(
+            "{} is not supported by the AML hardware encoder",
+            codec.display_name()
+        ))),
+    }
+}
+
+#[cfg(feature = "aml")]
+fn run_aml_venc_smoke_test(codec: VideoEncoderType, resolution: Resolution) -> Result<()> {
+    let width = resolution.width as i32;
+    let height = resolution.height as i32;
+    let bitrate = bitrate_kbps_for_resolution(resolution) as i32;
+    let mut encoder = match codec {
+        VideoEncoderType::H264 => {
+            AmlVencEncoder::new_h264(width, height, 30, bitrate, 30, 0, 0, VlImgFormat::Nv12)?
+        }
+        VideoEncoderType::H265 => {
+            AmlVencEncoder::new_h265(width, height, 30, bitrate, 30, 0, 0, VlImgFormat::Nv12)?
+        }
+        _ => {
+            return Err(AppError::VideoError(
+                "Unsupported AML hardware encoder codec".to_string(),
+            ))
+        }
+    };
+
+    let header = encoder.generate_header()?;
+    if !header.is_empty() {
+        return Ok(());
+    }
+
+    let frame = build_nv12_test_frame(
+        resolution,
+        PixelFormat::Nv12.frame_size(resolution).unwrap_or(0),
+    );
+    let stride = width;
+
+    for _ in 0..SELF_CHECK_FRAME_ATTEMPTS {
+        let frame = encoder.encode_raw(&frame, stride)?;
+        if !frame.data.is_empty() {
+            return Ok(());
+        }
+    }
+
+    Err(AppError::VideoError(
+        "AML encoder produced no output after multiple frames".to_string(),
+    ))
 }
 
 fn run_h264_smoke_test(resolution: Resolution, codec_name_ffmpeg: &str) -> Result<()> {
