@@ -84,25 +84,6 @@ fn is_hdmi_rx_device(device: &AudioDeviceInfo) -> bool {
         || device.description.to_lowercase().contains("hdmi in audio")
 }
 
-fn should_expose_capture_device(
-    card_longname: &str,
-    pcm_description: Option<&str>,
-    usb_bus: Option<&str>,
-) -> bool {
-    if usb_bus.is_some() {
-        return true;
-    }
-
-    if pcm_description.map(is_hdmi_rx_description).unwrap_or(false) {
-        return true;
-    }
-
-    // AML-AUGESOUND exposes several SoC-internal capture endpoints (SPDIF, PDM,
-    // TDM, HDMI loopback). They are not useful as KVM input sources and confuse
-    // the setup UI, so only the real HDMI RX endpoint is shown.
-    !is_aml_audio_card(card_longname)
-}
-
 fn friendly_audio_description(
     card_longname: &str,
     device_name: &str,
@@ -118,6 +99,10 @@ fn friendly_audio_description(
     }
 
     if let Some(pcm_description) = pcm_description {
+        if is_aml_audio_card(card_longname) {
+            return format!("AML-AUGESOUND - {} ({})", pcm_description, device_name);
+        }
+
         return format!("{} - {} ({})", card_longname, pcm_description, device_name);
     }
 
@@ -156,21 +141,6 @@ pub fn enumerate_audio_devices_with_current(
             let device_name = format!("hw:{},{}", card_index, device_index);
             let is_current_device = current_device == Some(device_name.as_str());
             let pcm_description = get_pcm_description(card_index, device_index);
-            if !is_current_device
-                && !should_expose_capture_device(
-                    &card_longname,
-                    pcm_description.as_deref(),
-                    usb_bus.as_deref(),
-                )
-            {
-                debug!(
-                    "Skipping non-KVM audio endpoint {}: {}",
-                    device_name,
-                    pcm_description.as_deref().unwrap_or("unknown")
-                );
-                continue;
-            }
-
             let is_hdmi = is_hdmi_capture_device(&card_longname, pcm_description.as_deref());
             let description = friendly_audio_description(
                 &card_longname,
@@ -309,21 +279,38 @@ mod tests {
     }
 
     #[test]
-    fn test_aml_internal_endpoint_is_hidden() {
-        assert!(!should_expose_capture_device(
+    fn test_aml_internal_endpoint_uses_pcm_name() {
+        let description = friendly_audio_description(
             "AML-AUGESOUND",
+            "hw:0,1",
             Some("SPDIF-dummy-alsaPORT-spdif soc:dummy-1"),
             None,
-        ));
+        );
+
+        assert_eq!(
+            description,
+            "AML-AUGESOUND - SPDIF-dummy-alsaPORT-spdif soc:dummy-1 (hw:0,1)"
+        );
     }
 
     #[test]
-    fn test_usb_capture_endpoint_is_visible() {
-        assert!(should_expose_capture_device(
+    fn test_usb_capture_endpoint_is_friendly() {
+        let description = friendly_audio_description(
             "USB Audio",
+            "hw:1,0",
             Some("USB Audio Capture"),
             Some("1-1"),
-        ));
+        );
+
+        assert_eq!(description, "USB Audio Capture 1-1 (hw:1,0)");
+    }
+
+    #[test]
+    fn test_plain_capture_endpoint_uses_pcm_name() {
+        let description =
+            friendly_audio_description("Generic Capture", "hw:2,0", Some("Line In"), None);
+
+        assert_eq!(description, "Generic Capture - Line In (hw:2,0)");
     }
 
     #[test]
