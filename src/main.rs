@@ -25,6 +25,7 @@ use one_kvm::otg::OtgService;
 use one_kvm::rtsp::RtspService;
 use one_kvm::rustdesk::RustDeskService;
 use one_kvm::state::AppState;
+use one_kvm::sunshine::SunshineService;
 use one_kvm::update::UpdateService;
 use one_kvm::utils::bind_tcp_listener;
 use one_kvm::video::codec_constraints::{
@@ -543,6 +544,23 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let sunshine = if config.sunshine.enabled {
+        tracing::info!(
+            "Initializing Sunshine-compatible NVHTTP service: http://{}:{}",
+            config.sunshine.bind,
+            config.sunshine.http_port
+        );
+        Some(Arc::new(SunshineService::new(
+            config.sunshine.clone(),
+            config.rtsp.clone(),
+            data_dir.clone(),
+            stream_manager.clone(),
+        )))
+    } else {
+        tracing::info!("Sunshine-compatible NVHTTP disabled in configuration");
+        None
+    };
+
     let update_service = Arc::new(UpdateService::new(data_dir.join("updates")));
 
     let state = AppState::new(
@@ -559,6 +577,7 @@ async fn main() -> anyhow::Result<()> {
         audio,
         rustdesk.clone(),
         rtsp.clone(),
+        sunshine.clone(),
         extensions.clone(),
         events.clone(),
         update_service,
@@ -596,6 +615,14 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("Failed to start RTSP service: {}", e);
         } else {
             tracing::info!("RTSP service started");
+        }
+    }
+
+    if let Some(ref service) = sunshine {
+        if let Err(e) = service.start().await {
+            tracing::error!("Failed to start Sunshine-compatible NVHTTP service: {}", e);
+        } else {
+            tracing::info!("Sunshine-compatible NVHTTP service started");
         }
     }
 
@@ -694,6 +721,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         run_servers_until_shutdown(servers, shutdown_signal, &state, "HTTP").await;
+    }
+
+    if let Some(ref service) = sunshine {
+        service.stop().await;
     }
 
     tracing::info!("Server shutdown complete");

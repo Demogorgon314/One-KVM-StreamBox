@@ -330,6 +330,72 @@ export const rustdeskConfigApi = {
     }),
 }
 
+export interface SunshineConfigResponse {
+  enabled: boolean
+  bind: string
+  http_port: number
+  https_port: number
+  hostname: string
+  unique_id: string
+  app_id: number
+  app_title: string
+}
+
+export interface SunshinePendingPairing {
+  unique_id: string
+  client_name: string
+  phase: string
+  has_pin: boolean
+}
+
+export interface SunshinePairedClient {
+  name: string
+  uuid: string
+  cert: string
+  enabled: boolean
+}
+
+export interface SunshineStatusResponse {
+  config: SunshineConfigResponse
+  service_status: string
+  pending_pairings: SunshinePendingPairing[]
+  clients: SunshinePairedClient[]
+}
+
+export interface SunshineConfigUpdate {
+  enabled?: boolean
+  bind?: string
+  http_port?: number
+  https_port?: number
+  hostname?: string
+  unique_id?: string
+  app_id?: number
+  app_title?: string
+}
+
+export interface SunshinePinRequest {
+  pin: string
+  name?: string
+}
+
+export const sunshineConfigApi = {
+  get: () => request<SunshineConfigResponse>('/config/sunshine'),
+
+  update: (config: SunshineConfigUpdate) =>
+    request<SunshineConfigResponse>('/config/sunshine', {
+      method: 'PATCH',
+      body: JSON.stringify(config),
+    }),
+
+  getStatus: () => request<SunshineStatusResponse>('/config/sunshine/status'),
+
+  submitPin: (payload: SunshinePinRequest) =>
+    request<SunshineStatusResponse>('/config/sunshine/pin', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+}
+
 export type RtspCodec = 'h264' | 'h265'
 
 export interface RtspConfigResponse {

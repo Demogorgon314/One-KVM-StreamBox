@@ -774,6 +774,85 @@ impl RustDeskConfigUpdate {
 }
 
 #[typeshare]
+#[derive(Debug, Deserialize)]
+pub struct SunshineConfigUpdate {
+    pub enabled: Option<bool>,
+    pub bind: Option<String>,
+    pub http_port: Option<u16>,
+    pub https_port: Option<u16>,
+    pub hostname: Option<String>,
+    pub unique_id: Option<String>,
+    pub app_id: Option<u32>,
+    pub app_title: Option<String>,
+}
+
+impl SunshineConfigUpdate {
+    pub fn validate(&self) -> crate::error::Result<()> {
+        if let Some(port) = self.http_port {
+            if port == 0 {
+                return Err(AppError::BadRequest(
+                    "HTTP port must be greater than 0".into(),
+                ));
+            }
+        }
+        if let Some(port) = self.https_port {
+            if port == 0 {
+                return Err(AppError::BadRequest(
+                    "HTTPS port must be greater than 0".into(),
+                ));
+            }
+        }
+        if let (Some(http_port), Some(https_port)) = (self.http_port, self.https_port) {
+            if http_port == https_port {
+                return Err(AppError::BadRequest(
+                    "HTTP and HTTPS ports must be different".into(),
+                ));
+            }
+        }
+        if let Some(ref hostname) = self.hostname {
+            if hostname.trim().is_empty() {
+                return Err(AppError::BadRequest("Hostname cannot be empty".into()));
+            }
+        }
+        if let Some(ref app_title) = self.app_title {
+            if app_title.trim().is_empty() {
+                return Err(AppError::BadRequest(
+                    "Application title cannot be empty".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn apply_to(&self, config: &mut SunshineConfig) {
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(ref bind) = self.bind {
+            config.bind = bind.trim().to_string();
+        }
+        if let Some(port) = self.http_port {
+            config.http_port = port;
+        }
+        if let Some(port) = self.https_port {
+            config.https_port = port;
+        }
+        if let Some(ref hostname) = self.hostname {
+            config.hostname = hostname.trim().to_string();
+        }
+        if let Some(ref unique_id) = self.unique_id {
+            config.unique_id = unique_id.trim().to_string();
+        }
+        if let Some(app_id) = self.app_id {
+            config.app_id = app_id;
+        }
+        if let Some(ref app_title) = self.app_title {
+            config.app_title = app_title.trim().to_string();
+        }
+    }
+}
+
+#[typeshare]
 #[derive(Debug, serde::Serialize)]
 pub struct RtspConfigResponse {
     pub enabled: bool,

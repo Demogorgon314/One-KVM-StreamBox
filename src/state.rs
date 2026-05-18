@@ -16,6 +16,7 @@ use crate::msd::MsdController;
 use crate::otg::OtgService;
 use crate::rtsp::RtspService;
 use crate::rustdesk::RustDeskService;
+use crate::sunshine::SunshineService;
 use crate::update::UpdateService;
 use crate::video::VideoStreamManager;
 use crate::webrtc::WebRtcStreamer;
@@ -29,6 +30,7 @@ pub struct ConfigApplyLocks {
     pub atx: Arc<Mutex<()>>,
     pub rustdesk: Arc<Mutex<()>>,
     pub rtsp: Arc<Mutex<()>>,
+    pub sunshine: Arc<Mutex<()>>,
 }
 
 impl ConfigApplyLocks {
@@ -41,6 +43,7 @@ impl ConfigApplyLocks {
             atx: Arc::new(Mutex::new(())),
             rustdesk: Arc::new(Mutex::new(())),
             rtsp: Arc::new(Mutex::new(())),
+            sunshine: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -60,6 +63,7 @@ pub struct AppState {
     pub audio: Arc<AudioController>,
     pub rustdesk: Arc<RwLock<Option<Arc<RustDeskService>>>>,
     pub rtsp: Arc<RwLock<Option<Arc<RtspService>>>>,
+    pub sunshine: Arc<RwLock<Option<Arc<SunshineService>>>>,
     pub extensions: Arc<ExtensionManager>,
     pub events: Arc<EventBus>,
     device_info_tx: watch::Sender<Option<SystemEvent>>,
@@ -86,6 +90,7 @@ impl AppState {
         audio: Arc<AudioController>,
         rustdesk: Option<Arc<RustDeskService>>,
         rtsp: Option<Arc<RtspService>>,
+        sunshine: Option<Arc<SunshineService>>,
         extensions: Arc<ExtensionManager>,
         events: Arc<EventBus>,
         update: Arc<UpdateService>,
@@ -108,6 +113,7 @@ impl AppState {
             audio,
             rustdesk: Arc::new(RwLock::new(rustdesk)),
             rtsp: Arc::new(RwLock::new(rtsp)),
+            sunshine: Arc::new(RwLock::new(sunshine)),
             extensions,
             events,
             device_info_tx,

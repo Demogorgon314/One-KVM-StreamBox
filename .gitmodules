@@ -1,0 +1,3 @@
+[submodule "libs/rusty_enet"]
+	path = libs/rusty_enet
+	url = https://github.com/jabuwu/rusty_enet

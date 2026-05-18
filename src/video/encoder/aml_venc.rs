@@ -19,7 +19,8 @@ const IOC_DIRSHIFT: u64 = IOC_SIZESHIFT + IOC_SIZEBITS;
 const IOC_WRITE: u64 = 1;
 const DMA_BUF_IOCTL_SYNC: libc::c_ulong = ((IOC_WRITE << IOC_DIRSHIFT)
     | (DMA_BUF_BASE << IOC_TYPESHIFT)
-    | (size_of::<DmaBufSync>() as u64) << IOC_SIZESHIFT) as libc::c_ulong;
+    | (size_of::<DmaBufSync>() as u64) << IOC_SIZESHIFT)
+    as libc::c_ulong;
 const DMA_BUF_SYNC_READ: u64 = 1 << 0;
 const DMA_BUF_SYNC_WRITE: u64 = 2 << 0;
 const DMA_BUF_SYNC_END: u64 = 1 << 2;
@@ -37,7 +38,10 @@ fn dma_buf_sync(fd: i32, flags: u64, label: &str) {
     let mut sync = DmaBufSync { flags };
     let rc = unsafe { libc::ioctl(fd, DMA_BUF_IOCTL_SYNC, &mut sync) };
     if rc != 0 {
-        warn!("DMA_BUF_IOCTL_SYNC {} failed on fd {}: rc={}", label, fd, rc);
+        warn!(
+            "DMA_BUF_IOCTL_SYNC {} failed on fd {}: rc={}",
+            label, fd, rc
+        );
     }
 }
 
@@ -218,11 +222,7 @@ impl AmlVencEncoder {
         let mut header_len: std::os::raw::c_uint = 0;
 
         let meta = unsafe {
-            vl_multi_encoder_generate_header(
-                self.handle,
-                header_buf.as_mut_ptr(),
-                &mut header_len,
-            )
+            vl_multi_encoder_generate_header(self.handle, header_buf.as_mut_ptr(), &mut header_len)
         };
 
         if !meta.is_valid {
@@ -307,11 +307,7 @@ impl AmlVencEncoder {
         let buf_info = VlBufferInfo {
             buf_type: VlBufferType::Vmalloc,
             buf_info: VlBufInfoU {
-                in_ptr: [
-                    data.as_ptr() as std::os::raw::c_ulong,
-                    0,
-                    0,
-                ],
+                in_ptr: [data.as_ptr() as std::os::raw::c_ulong, 0, 0],
             },
             buf_stride: stride,
             buf_fmt: self.img_format,

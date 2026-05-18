@@ -21,6 +21,8 @@ import {
   type RustDeskConfigResponse,
   type RustDeskStatusResponse,
   type RustDeskPasswordResponse,
+  type SunshineConfigResponse,
+  type SunshineStatusResponse,
   type RtspStatusResponse,
   type RtspConfigUpdate,
   type WebConfig,
@@ -98,6 +100,7 @@ import {
   ExternalLink,
   Copy,
   ScreenShare,
+  Gamepad2,
   Radio,
   Globe,
   Loader2,
@@ -125,6 +128,7 @@ const SETTINGS_SECTION_IDS = new Set([
   'environment',
   'ext-ttyd',
   'ext-rustdesk',
+  'ext-sunshine',
   'ext-rtsp',
   'ext-remote-access',
   'about',
@@ -154,6 +158,7 @@ const navGroups = computed(() => [
     items: [
       { id: 'ext-ttyd', label: t('extensions.ttyd.title'), icon: Terminal },
       { id: 'ext-rustdesk', label: t('extensions.rustdesk.title'), icon: ScreenShare },
+      { id: 'ext-sunshine', label: t('extensions.sunshine.title'), icon: Gamepad2 },
       { id: 'ext-rtsp', label: t('extensions.rtsp.title'), icon: Radio },
       { id: 'ext-remote-access', label: t('extensions.remoteAccess.title'), icon: ExternalLink },
     ]
@@ -187,6 +192,7 @@ function sectionSubtitleKey(id: string): string {
   switch (id) {
     case 'ext-ttyd': return 'extTtydSubtitle'
     case 'ext-rustdesk': return 'extRustdeskSubtitle'
+    case 'ext-sunshine': return 'extSunshineSubtitle'
     case 'ext-rtsp': return 'extRtspSubtitle'
     case 'ext-remote-access': return 'extRemoteAccessSubtitle'
     default: return `${id}Subtitle`
@@ -259,6 +265,21 @@ const rustdeskLocalConfig = ref({
   rendezvous_server: '',
   relay_server: '',
   relay_key: '',
+})
+
+const sunshineConfig = ref<SunshineConfigResponse | null>(null)
+const sunshineStatus = ref<SunshineStatusResponse | null>(null)
+const sunshineLoading = ref(false)
+const sunshinePin = ref('')
+const sunshineLocalConfig = ref({
+  enabled: false,
+  bind: '0.0.0.0',
+  http_port: 47989,
+  https_port: 47984,
+  hostname: 'One-KVM',
+  unique_id: '',
+  app_id: 1,
+  app_title: 'HDMI Input',
 })
 
 const rtspStatus = ref<RtspStatusResponse | null>(null)
@@ -1539,6 +1560,30 @@ async function loadRustdeskPassword() {
   }
 }
 
+async function loadSunshineConfig() {
+  sunshineLoading.value = true
+  try {
+    const status = await configStore.refreshSunshineStatus()
+    const config = status.config
+    sunshineConfig.value = config
+    sunshineStatus.value = status
+    sunshineLocalConfig.value = {
+      enabled: config.enabled,
+      bind: config.bind,
+      http_port: config.http_port,
+      https_port: config.https_port,
+      hostname: config.hostname,
+      unique_id: config.unique_id,
+      app_id: config.app_id,
+      app_title: config.app_title,
+    }
+  } catch (e) {
+    console.error('Failed to load Sunshine config:', e)
+  } finally {
+    sunshineLoading.value = false
+  }
+}
+
 function normalizeRustdeskServer(value: string, defaultPort: number): string | undefined {
   const trimmed = value.trim()
   if (!trimmed) return undefined
@@ -1947,6 +1992,94 @@ async function stopRustdesk() {
   }
 }
 
+async function saveSunshineConfig() {
+  loading.value = true
+  saved.value = false
+  try {
+    await configStore.updateSunshine({
+      enabled: sunshineLocalConfig.value.enabled,
+      bind: sunshineLocalConfig.value.bind,
+      http_port: Number(sunshineLocalConfig.value.http_port),
+      https_port: Number(sunshineLocalConfig.value.https_port),
+      hostname: sunshineLocalConfig.value.hostname,
+      unique_id: sunshineLocalConfig.value.unique_id,
+      app_id: Number(sunshineLocalConfig.value.app_id),
+      app_title: sunshineLocalConfig.value.app_title,
+    })
+    await loadSunshineConfig()
+    saved.value = true
+    setTimeout(() => (saved.value = false), 2000)
+  } catch (e) {
+    console.error('Failed to save Sunshine config:', e)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function startSunshine() {
+  sunshineLoading.value = true
+  try {
+    await configStore.updateSunshine({ enabled: true })
+    sunshineLocalConfig.value.enabled = true
+    await loadSunshineConfig()
+  } catch (e) {
+    console.error('Failed to start Sunshine:', e)
+  } finally {
+    sunshineLoading.value = false
+  }
+}
+
+async function stopSunshine() {
+  sunshineLoading.value = true
+  try {
+    await configStore.updateSunshine({ enabled: false })
+    sunshineLocalConfig.value.enabled = false
+    await loadSunshineConfig()
+  } catch (e) {
+    console.error('Failed to stop Sunshine:', e)
+  } finally {
+    sunshineLoading.value = false
+  }
+}
+
+async function submitSunshinePin() {
+  const pin = sunshinePin.value.trim()
+  if (pin.length !== 4) return
+  sunshineLoading.value = true
+  try {
+    sunshineStatus.value = await configStore.submitSunshinePin({ pin, name: 'Moonlight' })
+    sunshineConfig.value = sunshineStatus.value.config
+    sunshinePin.value = ''
+  } catch (e) {
+    console.error('Failed to submit Moonlight PIN:', e)
+  } finally {
+    sunshineLoading.value = false
+  }
+}
+
+function getSunshineServiceStatusText(status: string | undefined): string {
+  if (!status) return t('extensions.sunshine.notConfigured')
+  switch (status) {
+    case 'running': return t('extensions.running')
+    case 'stopped': return t('extensions.stopped')
+    case 'not_initialized': return t('extensions.sunshine.notInitialized')
+    default:
+      if (status.startsWith('error:')) return t('extensions.failed')
+      return status
+  }
+}
+
+function getSunshineStatusClass(status: string | null | undefined): string {
+  switch (status) {
+    case 'running': return 'bg-green-500'
+    case 'stopped':
+    case 'not_initialized': return 'bg-muted-foreground'
+    default:
+      if (status?.startsWith('error:')) return 'bg-red-500'
+      return 'bg-yellow-500'
+  }
+}
+
 async function copyToClipboard(text: string, type: 'id' | 'password') {
   const success = await clipboardCopy(text)
   if (success) {
@@ -2116,6 +2249,7 @@ onMounted(async () => {
     loadAtxDevices(),
     loadRustdeskConfig(),
     loadRustdeskPassword(),
+    loadSunshineConfig(),
     loadRtspConfig(),
     loadWebServerConfig(),
     loadRedfishConfig(),
@@ -4152,6 +4286,118 @@ watch(() => route.query.tab, (tab) => {
             <!-- Save button -->
             <div class="flex justify-end">
               <Button :disabled="loading" @click="saveRustdeskConfig">
+                <Loader2 v-if="loading" class="h-4 w-4 mr-2 animate-spin" /><Check v-else-if="saved" class="h-4 w-4 mr-2" /><Save v-else class="h-4 w-4 mr-2" />{{ loading ? t('actionbar.applying') : saved ? t('common.success') : t('common.save') }}
+              </Button>
+            </div>
+          </div>
+
+          <!-- Sunshine / Moonlight Section -->
+          <div v-show="activeSection === 'ext-sunshine'" class="space-y-6">
+            <Card>
+              <CardHeader>
+                <div class="flex items-center justify-between">
+                  <div class="space-y-1.5">
+                    <CardTitle>{{ t('extensions.sunshine.title') }}</CardTitle>
+                    <CardDescription>{{ t('extensions.sunshine.desc') }}</CardDescription>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <Badge :variant="sunshineStatus?.service_status === 'running' ? 'default' : 'secondary'">
+                      {{ getSunshineServiceStatusText(sunshineStatus?.service_status) }}
+                    </Badge>
+                    <Button variant="ghost" size="icon" class="h-8 w-8" :aria-label="t('common.refresh')" @click="loadSunshineConfig" :disabled="sunshineLoading">
+                      <RefreshCw :class="['h-4 w-4', sunshineLoading ? 'animate-spin' : '']" />
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent class="space-y-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div class="flex items-center gap-2">
+                    <div :class="['w-2 h-2 rounded-full', getSunshineStatusClass(sunshineStatus?.service_status)]" />
+                    <span class="text-sm">{{ getSunshineServiceStatusText(sunshineStatus?.service_status) }}</span>
+                    <span class="text-sm text-muted-foreground">{{ t('extensions.sunshine.clientCount', { count: sunshineStatus?.clients?.length || 0 }) }}</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <Button
+                      v-if="sunshineStatus?.service_status !== 'running'"
+                      size="sm"
+                      @click="startSunshine"
+                      :disabled="sunshineLoading"
+                    >
+                      <Play class="h-4 w-4 mr-1" />
+                      {{ t('extensions.start') }}
+                    </Button>
+                    <Button
+                      v-else
+                      size="sm"
+                      variant="outline"
+                      @click="stopSunshine"
+                      :disabled="sunshineLoading"
+                    >
+                      <Square class="h-4 w-4 mr-1" />
+                      {{ t('extensions.stop') }}
+                    </Button>
+                  </div>
+                </div>
+                <Separator />
+
+                <div class="grid gap-4">
+                  <div class="flex items-center justify-between">
+                    <Label>{{ t('extensions.autoStart') }}</Label>
+                    <Switch v-model="sunshineLocalConfig.enabled" />
+                  </div>
+                  <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                    <Label class="sm:text-right">{{ t('extensions.sunshine.hostname') }}</Label>
+                    <Input v-model="sunshineLocalConfig.hostname" class="sm:col-span-3" />
+                  </div>
+                  <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                    <Label class="sm:text-right">{{ t('extensions.sunshine.appTitle') }}</Label>
+                    <Input v-model="sunshineLocalConfig.app_title" class="sm:col-span-3" />
+                  </div>
+                  <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                    <Label class="sm:text-right">{{ t('extensions.sunshine.bind') }}</Label>
+                    <Input v-model="sunshineLocalConfig.bind" class="sm:col-span-3 font-mono" />
+                  </div>
+                  <div class="grid gap-2 sm:grid-cols-4 sm:items-center">
+                    <Label class="sm:text-right">{{ t('extensions.sunshine.ports') }}</Label>
+                    <div class="sm:col-span-3 grid grid-cols-2 gap-2">
+                      <Input v-model.number="sunshineLocalConfig.http_port" type="number" min="1" max="65535" class="font-mono" />
+                      <Input v-model.number="sunshineLocalConfig.https_port" type="number" min="1" max="65535" class="font-mono" />
+                    </div>
+                  </div>
+                </div>
+                <Separator />
+
+                <div class="grid gap-3">
+                  <div class="flex items-center justify-between">
+                    <h4 class="text-sm font-medium">{{ t('extensions.sunshine.pairing') }}</h4>
+                    <Badge variant="outline">{{ sunshineStatus?.pending_pairings?.length || 0 }}</Badge>
+                  </div>
+                  <div class="flex gap-2">
+                    <Input
+                      v-model="sunshinePin"
+                      inputmode="numeric"
+                      maxlength="4"
+                      autocomplete="one-time-code"
+                      class="font-mono tracking-widest"
+                      :placeholder="t('extensions.sunshine.pinPlaceholder')"
+                    />
+                    <Button :disabled="sunshineLoading || sunshinePin.trim().length !== 4" @click="submitSunshinePin">
+                      <Check class="h-4 w-4 mr-2" />
+                      {{ t('extensions.sunshine.submitPin') }}
+                    </Button>
+                  </div>
+                  <div v-if="sunshineStatus?.pending_pairings?.length" class="space-y-2">
+                    <div v-for="pairing in sunshineStatus.pending_pairings" :key="pairing.unique_id" class="flex items-center justify-between rounded-md border px-3 py-2">
+                      <span class="text-sm">{{ pairing.client_name }}</span>
+                      <span class="text-xs text-muted-foreground font-mono">{{ pairing.unique_id }}</span>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <div class="flex justify-end">
+              <Button :disabled="loading || sunshineLoading" @click="saveSunshineConfig">
                 <Loader2 v-if="loading" class="h-4 w-4 mr-2 animate-spin" /><Check v-else-if="saved" class="h-4 w-4 mr-2" /><Save v-else class="h-4 w-4 mr-2" />{{ loading ? t('actionbar.applying') : saved ? t('common.success') : t('common.save') }}
               </Button>
             </div>

@@ -249,10 +249,8 @@ extern "C" {
         multi_slice_para: c_int,
     ) -> c_int;
 
-    pub fn vl_video_encoder_longterm_ref(
-        handle: VlCodecHandle,
-        longterm_ref_flags: c_int,
-    ) -> c_int;
+    pub fn vl_video_encoder_longterm_ref(handle: VlCodecHandle, longterm_ref_flags: c_int)
+        -> c_int;
 
     pub fn vl_video_encoder_skip_frame(handle: VlCodecHandle) -> c_int;
 
@@ -276,7 +274,10 @@ mod tests {
             expected_size,
             "EncodingMetadata size mismatch — bool padding may be wrong"
         );
-        assert_eq!(offset_of!(EncodingMetadata, encoded_data_length_in_bytes), 0);
+        assert_eq!(
+            offset_of!(EncodingMetadata, encoded_data_length_in_bytes),
+            0
+        );
         assert_eq!(offset_of!(EncodingMetadata, is_key_frame), 4);
         assert_eq!(offset_of!(EncodingMetadata, timestamp_us), 8);
         assert_eq!(offset_of!(EncodingMetadata, is_valid), 12);

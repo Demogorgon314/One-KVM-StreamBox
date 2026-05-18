@@ -7,9 +7,9 @@ use super::{
     VP9Config, VP9Encoder, VideoEncoderType,
 };
 use crate::error::{AppError, Result};
-use crate::video::format::{PixelFormat, Resolution};
 #[cfg(feature = "aml")]
 use crate::video::encoder::aml_venc::AmlVencEncoder;
+use crate::video::format::{PixelFormat, Resolution};
 
 const SELF_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_CHECK_FRAME_ATTEMPTS: u64 = 3;

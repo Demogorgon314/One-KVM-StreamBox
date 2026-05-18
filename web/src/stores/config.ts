@@ -8,6 +8,7 @@ import {
   msdConfigApi,
   rtspConfigApi,
   rustdeskConfigApi,
+  sunshineConfigApi,
   streamConfigApi,
   videoConfigApi,
   webConfigApi,
@@ -36,6 +37,10 @@ import type {
   RustDeskConfigUpdate as ApiRustDeskConfigUpdate,
   RustDeskStatusResponse as ApiRustDeskStatusResponse,
   RustDeskPasswordResponse as ApiRustDeskPasswordResponse,
+  SunshineConfigResponse as ApiSunshineConfigResponse,
+  SunshineConfigUpdate as ApiSunshineConfigUpdate,
+  SunshineStatusResponse as ApiSunshineStatusResponse,
+  SunshinePinRequest as ApiSunshinePinRequest,
   WebConfig,
   WebConfigUpdate,
 } from '@/api'
@@ -60,6 +65,8 @@ export const useConfigStore = defineStore('config', () => {
   const rustdeskConfig = ref<ApiRustDeskConfigResponse | null>(null)
   const rustdeskStatus = ref<ApiRustDeskStatusResponse | null>(null)
   const rustdeskPassword = ref<ApiRustDeskPasswordResponse | null>(null)
+  const sunshineConfig = ref<ApiSunshineConfigResponse | null>(null)
+  const sunshineStatus = ref<ApiSunshineStatusResponse | null>(null)
 
   const authLoading = ref(false)
   const videoLoading = ref(false)
@@ -71,6 +78,7 @@ export const useConfigStore = defineStore('config', () => {
   const atxLoading = ref(false)
   const rtspLoading = ref(false)
   const rustdeskLoading = ref(false)
+  const sunshineLoading = ref(false)
 
   const authError = ref<string | null>(null)
   const videoError = ref<string | null>(null)
@@ -82,6 +90,7 @@ export const useConfigStore = defineStore('config', () => {
   const atxError = ref<string | null>(null)
   const rtspError = ref<string | null>(null)
   const rustdeskError = ref<string | null>(null)
+  const sunshineError = ref<string | null>(null)
 
   let authPromise: Promise<AuthConfig> | null = null
   let videoPromise: Promise<VideoConfig> | null = null
@@ -96,6 +105,8 @@ export const useConfigStore = defineStore('config', () => {
   let rustdeskPromise: Promise<ApiRustDeskConfigResponse> | null = null
   let rustdeskStatusPromise: Promise<ApiRustDeskStatusResponse> | null = null
   let rustdeskPasswordPromise: Promise<ApiRustDeskPasswordResponse> | null = null
+  let sunshinePromise: Promise<ApiSunshineConfigResponse> | null = null
+  let sunshineStatusPromise: Promise<ApiSunshineStatusResponse> | null = null
 
   async function refreshAuth() {
     if (authLoading.value && authPromise) return authPromise
@@ -385,6 +396,51 @@ export const useConfigStore = defineStore('config', () => {
     return request
   }
 
+  async function refreshSunshineConfig() {
+    if (sunshineLoading.value && sunshinePromise) return sunshinePromise
+    sunshineLoading.value = true
+    sunshineError.value = null
+    const request = sunshineConfigApi.get()
+      .then((response) => {
+        sunshineConfig.value = response
+        return response
+      })
+      .catch((error) => {
+        sunshineError.value = normalizeErrorMessage(error)
+        throw error
+      })
+      .finally(() => {
+        sunshineLoading.value = false
+        sunshinePromise = null
+      })
+
+    sunshinePromise = request
+    return request
+  }
+
+  async function refreshSunshineStatus() {
+    if (sunshineLoading.value && sunshineStatusPromise) return sunshineStatusPromise
+    sunshineLoading.value = true
+    sunshineError.value = null
+    const request = sunshineConfigApi.getStatus()
+      .then((response) => {
+        sunshineStatus.value = response
+        sunshineConfig.value = response.config
+        return response
+      })
+      .catch((error) => {
+        sunshineError.value = normalizeErrorMessage(error)
+        throw error
+      })
+      .finally(() => {
+        sunshineLoading.value = false
+        sunshineStatusPromise = null
+      })
+
+    sunshineStatusPromise = request
+    return request
+  }
+
   function ensureAuth() {
     if (auth.value) return Promise.resolve(auth.value)
     return refreshAuth()
@@ -433,6 +489,11 @@ export const useConfigStore = defineStore('config', () => {
   function ensureRustdeskConfig() {
     if (rustdeskConfig.value) return Promise.resolve(rustdeskConfig.value)
     return refreshRustdeskConfig()
+  }
+
+  function ensureSunshineConfig() {
+    if (sunshineConfig.value) return Promise.resolve(sunshineConfig.value)
+    return refreshSunshineConfig()
   }
 
   async function updateAuth(update: AuthConfigUpdate) {
@@ -507,6 +568,19 @@ export const useConfigStore = defineStore('config', () => {
     return response
   }
 
+  async function updateSunshine(update: ApiSunshineConfigUpdate) {
+    const response = await sunshineConfigApi.update(update)
+    sunshineConfig.value = response
+    return response
+  }
+
+  async function submitSunshinePin(payload: ApiSunshinePinRequest) {
+    const response = await sunshineConfigApi.submitPin(payload)
+    sunshineStatus.value = response
+    sunshineConfig.value = response.config
+    return response
+  }
+
   return {
     auth,
     video,
@@ -521,6 +595,8 @@ export const useConfigStore = defineStore('config', () => {
     rustdeskConfig,
     rustdeskStatus,
     rustdeskPassword,
+    sunshineConfig,
+    sunshineStatus,
     authLoading,
     videoLoading,
     audioLoading,
@@ -531,6 +607,7 @@ export const useConfigStore = defineStore('config', () => {
     atxLoading,
     rtspLoading,
     rustdeskLoading,
+    sunshineLoading,
     authError,
     videoError,
     audioError,
@@ -541,6 +618,7 @@ export const useConfigStore = defineStore('config', () => {
     atxError,
     rtspError,
     rustdeskError,
+    sunshineError,
     refreshAuth,
     refreshVideo,
     refreshAudio,
@@ -554,6 +632,8 @@ export const useConfigStore = defineStore('config', () => {
     refreshRustdeskConfig,
     refreshRustdeskStatus,
     refreshRustdeskPassword,
+    refreshSunshineConfig,
+    refreshSunshineStatus,
     ensureAuth,
     ensureVideo,
     ensureAudio,
@@ -564,6 +644,7 @@ export const useConfigStore = defineStore('config', () => {
     ensureAtx,
     ensureRtspConfig,
     ensureRustdeskConfig,
+    ensureSunshineConfig,
     updateAuth,
     updateVideo,
     updateAudio,
@@ -576,5 +657,7 @@ export const useConfigStore = defineStore('config', () => {
     updateRustdesk,
     regenerateRustdeskId,
     regenerateRustdeskPassword,
+    updateSunshine,
+    submitSunshinePin,
   }
 })

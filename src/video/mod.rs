@@ -2,16 +2,16 @@
 //!
 //! This module provides V4L2 video capture, encoding, and streaming functionality.
 
+#[cfg(feature = "aml")]
+pub mod aml_pipeline;
 pub(crate) mod capture_limits;
 pub(crate) mod capture_status;
 pub mod capture_trait;
-#[cfg(feature = "aml")]
-pub mod aml_pipeline;
 pub mod codec_constraints;
 pub mod convert;
-pub mod decoder;
 #[cfg(not(feature = "aml"))]
 pub mod csi_bridge;
+pub mod decoder;
 #[cfg(not(feature = "aml"))]
 pub mod device;
 #[cfg(feature = "aml")]

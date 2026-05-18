@@ -25,10 +25,7 @@ pub struct DmaBufFrame {
 
 #[derive(Debug)]
 pub enum FrameData {
-    Mapped {
-        data: Vec<u8>,
-        meta: CaptureMeta,
-    },
+    Mapped { data: Vec<u8>, meta: CaptureMeta },
     DmaBuf(DmaBufFrame),
 }
 

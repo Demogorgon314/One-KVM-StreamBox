@@ -1637,7 +1637,6 @@ pub async fn mjpeg_stream(
                 }
             }
         }
-
     });
 
     // Create stream that receives from channel and forwards to the HTTP

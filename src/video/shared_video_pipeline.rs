@@ -55,7 +55,10 @@ use crate::video::format::{PixelFormat, Resolution};
 use crate::video::frame::{FrameBuffer, FrameBufferPool, VideoFrame};
 use crate::video::v4l2r_capture::{is_source_changed_error, BridgeContext, V4l2rCaptureStream};
 use crate::video::SignalStatus;
-#[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "arm"),
+    not(feature = "aml")
+))]
 use hwcodec::ffmpeg_hw::last_error_message as ffmpeg_hw_last_error;
 
 /// Encoded video frame for distribution
@@ -473,9 +476,15 @@ impl SharedVideoPipeline {
     fn apply_cmd(&self, state: &mut EncoderThreadState, cmd: PipelineCmd) -> Result<()> {
         match cmd {
             PipelineCmd::SetBitrate { bitrate_kbps, gop } => {
-                #[cfg(any(not(any(target_arch = "aarch64", target_arch = "arm")), feature = "aml"))]
+                #[cfg(any(
+                    not(any(target_arch = "aarch64", target_arch = "arm")),
+                    feature = "aml"
+                ))]
                 let _ = gop;
-                #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+                #[cfg(all(
+                    any(target_arch = "aarch64", target_arch = "arm"),
+                    not(feature = "aml")
+                ))]
                 if state.ffmpeg_hw_enabled {
                     if let Some(ref mut pipeline) = state.ffmpeg_hw_pipeline {
                         pipeline
@@ -1272,7 +1281,10 @@ impl SharedVideoPipeline {
             current_ts_ms - start_ts
         };
 
-        #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+        #[cfg(all(
+            any(target_arch = "aarch64", target_arch = "arm"),
+            not(feature = "aml")
+        ))]
         if state.ffmpeg_hw_enabled {
             if input_format != PixelFormat::Mjpeg {
                 return Err(AppError::VideoError(

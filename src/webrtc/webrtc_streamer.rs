@@ -525,7 +525,9 @@ impl WebRtcStreamer {
                     .await;
                 *pipeline_guard = None;
             } else {
-                info!("ensure_video_pipeline: existing pipeline not running, dropping and recreating");
+                info!(
+                    "ensure_video_pipeline: existing pipeline not running, dropping and recreating"
+                );
                 // Drop the stale pipeline reference so we create a new one
                 *pipeline_guard = None;
             }
@@ -624,10 +626,7 @@ impl WebRtcStreamer {
                                 .publish_stream_event(SystemEvent::StreamConfigApplied {
                                     transition_id: None,
                                     device,
-                                    resolution: (
-                                        config.resolution.width,
-                                        config.resolution.height,
-                                    ),
+                                    resolution: (config.resolution.width, config.resolution.height),
                                     format: config.input_format.to_string(),
                                     fps: config.fps,
                                 })

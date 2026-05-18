@@ -93,10 +93,7 @@ pub const VFMCAP_SIG_NOTSUP: c_uint = 2;
 
 #[link(name = "vfmcap")]
 extern "C" {
-    pub fn vfmcap_open(
-        device: *const c_char,
-        config: *const VfmcapConfig,
-    ) -> *mut VfmcapCtx;
+    pub fn vfmcap_open(device: *const c_char, config: *const VfmcapConfig) -> *mut VfmcapCtx;
 
     pub fn vfmcap_start(ctx: *mut VfmcapCtx, num_buffers: c_uint) -> c_int;
 
@@ -114,18 +111,11 @@ extern "C" {
 
     pub fn vfmcap_poll_event(ctx: *mut VfmcapCtx, timeout_ms: c_int) -> c_int;
 
-    pub fn vfmcap_get_signal_info(
-        ctx: *mut VfmcapCtx,
-        info: *mut VfmcapSignalInfo,
-    ) -> c_int;
+    pub fn vfmcap_get_signal_info(ctx: *mut VfmcapCtx, info: *mut VfmcapSignalInfo) -> c_int;
 
     pub fn vfmcap_last_error(ctx: *mut VfmcapCtx) -> *const c_char;
 
-    pub fn vfmcap_output_size(
-        width: c_uint,
-        height: c_uint,
-        fmt: VfmcapOutputFmt,
-    ) -> c_uint;
+    pub fn vfmcap_output_size(width: c_uint, height: c_uint, fmt: VfmcapOutputFmt) -> c_uint;
 }
 
 #[cfg(test)]

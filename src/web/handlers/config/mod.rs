@@ -10,6 +10,7 @@ mod redfish;
 mod rtsp;
 mod rustdesk;
 mod stream;
+mod sunshine;
 pub(crate) mod video;
 mod web;
 
@@ -25,6 +26,9 @@ pub use rustdesk::{
     regenerate_device_password, update_rustdesk_config,
 };
 pub use stream::{get_stream_config, update_stream_config};
+pub use sunshine::{
+    get_sunshine_config, get_sunshine_status, submit_sunshine_pin, update_sunshine_config,
+};
 pub use video::{get_video_config, update_video_config};
 pub use web::{get_web_config, update_web_config};
 

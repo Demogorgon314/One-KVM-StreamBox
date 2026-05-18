@@ -140,11 +140,16 @@ fn static_response(path: &str, data: Vec<u8>) -> Response<Body> {
     let mime = mime_guess::from_path(path)
         .first_or_octet_stream()
         .to_string();
+    let cache_control = if path.ends_with(".html") {
+        "no-cache"
+    } else {
+        "public, max-age=86400"
+    };
 
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .header(header::CACHE_CONTROL, cache_control)
         .body(Body::from(data))
         .unwrap()
 }

@@ -133,6 +133,23 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/config/rustdesk/regenerate-password",
             post(handlers::config::regenerate_device_password),
         )
+        // Sunshine/GameStream configuration endpoints
+        .route(
+            "/config/sunshine",
+            get(handlers::config::get_sunshine_config),
+        )
+        .route(
+            "/config/sunshine",
+            patch(handlers::config::update_sunshine_config),
+        )
+        .route(
+            "/config/sunshine/status",
+            get(handlers::config::get_sunshine_status),
+        )
+        .route(
+            "/config/sunshine/pin",
+            post(handlers::config::submit_sunshine_pin),
+        )
         // RTSP configuration endpoints
         .route("/config/rtsp", get(handlers::config::get_rtsp_config))
         .route("/config/rtsp", patch(handlers::config::update_rtsp_config))
@@ -148,7 +165,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/config/auth", patch(handlers::config::update_auth_config))
         // Redfish configuration
         .route("/config/redfish", get(handlers::config::get_redfish_config))
-        .route("/config/redfish", patch(handlers::config::update_redfish_config))
+        .route(
+            "/config/redfish",
+            patch(handlers::config::update_redfish_config),
+        )
         // System control
         .route("/system/restart", post(handlers::system_restart))
         .route("/update/overview", get(handlers::update_overview))

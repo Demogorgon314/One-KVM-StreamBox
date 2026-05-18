@@ -110,6 +110,8 @@ pub struct AppConfig {
     pub rustdesk: RustDeskConfig,
     /// RTSP streaming settings
     pub rtsp: RtspConfig,
+    /// Sunshine/GameStream compatibility settings
+    pub sunshine: SunshineConfig,
     /// Redfish API settings
     pub redfish: RedfishConfig,
 }
@@ -719,6 +721,48 @@ impl Default for RtspConfig {
             codec: RtspCodec::H264,
             username: None,
             password: None,
+        }
+    }
+}
+
+/// Sunshine/GameStream compatibility configuration.
+///
+/// This is intentionally separate from the plain RTSP output. Moonlight uses
+/// NVIDIA GameStream discovery/control endpoints before it starts the RTSP/RTP
+/// media session.
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SunshineConfig {
+    /// Enable the Sunshine-compatible NVHTTP service
+    pub enabled: bool,
+    /// Bind IP address
+    pub bind: String,
+    /// Plain HTTP NVHTTP port used by Moonlight discovery
+    pub http_port: u16,
+    /// HTTPS NVHTTP port used after Moonlight pairing
+    pub https_port: u16,
+    /// Display name shown in Moonlight
+    pub hostname: String,
+    /// Stable GameStream host id. If empty, One-KVM derives one from machine-id.
+    pub unique_id: String,
+    /// Application id exposed to Moonlight
+    pub app_id: u32,
+    /// Application title exposed to Moonlight
+    pub app_title: String,
+}
+
+impl Default for SunshineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: "0.0.0.0".to_string(),
+            http_port: 47989,
+            https_port: 47984,
+            hostname: "One-KVM".to_string(),
+            unique_id: String::new(),
+            app_id: 1,
+            app_title: "HDMI Input".to_string(),
         }
     }
 }

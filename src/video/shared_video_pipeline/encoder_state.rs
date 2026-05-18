@@ -8,16 +8,19 @@ use crate::video::encoder::traits::EncoderConfig;
 use crate::video::encoder::vp8::{VP8Config, VP8Encoder};
 use crate::video::encoder::vp9::{VP9Config, VP9Encoder};
 use crate::video::format::{PixelFormat, Resolution};
-#[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "arm"),
+    not(feature = "aml")
+))]
 use hwcodec::ffmpeg_hw::{
     last_error_message as ffmpeg_hw_last_error, HwMjpegH26xConfig, HwMjpegH26xPipeline,
 };
 use tracing::info;
 
 #[cfg(feature = "aml")]
-use crate::video::encoder::aml_venc::AmlVencEncoder;
-#[cfg(feature = "aml")]
 use crate::ffi::multienc::{VlCodecId, VlImgFormat};
+#[cfg(feature = "aml")]
+use crate::video::encoder::aml_venc::AmlVencEncoder;
 
 use super::SharedVideoPipelineConfig;
 
@@ -27,9 +30,15 @@ pub(super) struct EncoderThreadState {
     pub(super) nv12_converter: Option<Nv12Converter>,
     pub(super) yuv420p_converter: Option<PixelConverter>,
     pub(super) encoder_needs_yuv420p: bool,
-    #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "arm"),
+        not(feature = "aml")
+    ))]
     pub(super) ffmpeg_hw_pipeline: Option<HwMjpegH26xPipeline>,
-    #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "arm"),
+        not(feature = "aml")
+    ))]
     pub(super) ffmpeg_hw_enabled: bool,
     pub(super) fps: u32,
     pub(super) codec: VideoEncoderType,
@@ -273,9 +282,15 @@ pub(super) fn build_encoder_state(
         }
     };
 
-    #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "arm"),
+        not(feature = "aml")
+    ))]
     let is_rkmpp_encoder = selected_codec_name.contains("rkmpp");
-    #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "arm"),
+        not(feature = "aml")
+    ))]
     if needs_mjpeg_decode
         && is_rkmpp_encoder
         && matches!(
@@ -315,9 +330,15 @@ pub(super) fn build_encoder_state(
             nv12_converter: None,
             yuv420p_converter: None,
             encoder_needs_yuv420p: false,
-            #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+            #[cfg(all(
+                any(target_arch = "aarch64", target_arch = "arm"),
+                not(feature = "aml")
+            ))]
             ffmpeg_hw_pipeline: Some(pipeline),
-            #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+            #[cfg(all(
+                any(target_arch = "aarch64", target_arch = "arm"),
+                not(feature = "aml")
+            ))]
             ffmpeg_hw_enabled: true,
             fps: config.fps,
             codec: config.output_codec,
@@ -524,9 +545,15 @@ pub(super) fn build_encoder_state(
         nv12_converter,
         yuv420p_converter,
         encoder_needs_yuv420p: needs_yuv420p,
-        #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+        #[cfg(all(
+            any(target_arch = "aarch64", target_arch = "arm"),
+            not(feature = "aml")
+        ))]
         ffmpeg_hw_pipeline: None,
-        #[cfg(all(any(target_arch = "aarch64", target_arch = "arm"), not(feature = "aml")))]
+        #[cfg(all(
+            any(target_arch = "aarch64", target_arch = "arm"),
+            not(feature = "aml")
+        ))]
         ffmpeg_hw_enabled: false,
         fps: config.fps,
         codec: config.output_codec,

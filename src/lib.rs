@@ -7,9 +7,9 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod extensions;
 #[cfg(feature = "aml")]
 pub mod ffi;
-pub mod extensions;
 pub mod hid;
 pub mod msd;
 pub mod otg;
@@ -19,6 +19,7 @@ pub mod rustdesk;
 pub mod state;
 pub mod stream;
 pub mod stream_encoder;
+pub mod sunshine;
 pub mod update;
 pub mod utils;
 pub mod video;

@@ -296,20 +296,28 @@ impl EncoderRegistry {
                 info!("AML build: skipping hwcodec encoder detection to avoid vdin0 disruption");
                 registry.register_software_fallbacks();
                 // Also register known AML hardware encoders
-                registry.encoders.entry(VideoEncoderType::H264).or_default().push(AvailableEncoder {
-                    format: VideoEncoderType::H264,
-                    codec_name: "h264_aml".to_string(),
-                    backend: EncoderBackend::Amlvenc,
-                    priority: 1,
-                    is_hardware: true,
-                });
-                registry.encoders.entry(VideoEncoderType::H265).or_default().push(AvailableEncoder {
-                    format: VideoEncoderType::H265,
-                    codec_name: "hevc_aml".to_string(),
-                    backend: EncoderBackend::Amlvenc,
-                    priority: 1,
-                    is_hardware: true,
-                });
+                registry
+                    .encoders
+                    .entry(VideoEncoderType::H264)
+                    .or_default()
+                    .push(AvailableEncoder {
+                        format: VideoEncoderType::H264,
+                        codec_name: "h264_aml".to_string(),
+                        backend: EncoderBackend::Amlvenc,
+                        priority: 1,
+                        is_hardware: true,
+                    });
+                registry
+                    .encoders
+                    .entry(VideoEncoderType::H265)
+                    .or_default()
+                    .push(AvailableEncoder {
+                        format: VideoEncoderType::H265,
+                        codec_name: "hevc_aml".to_string(),
+                        backend: EncoderBackend::Amlvenc,
+                        priority: 1,
+                        is_hardware: true,
+                    });
             }
             #[cfg(not(feature = "aml"))]
             {

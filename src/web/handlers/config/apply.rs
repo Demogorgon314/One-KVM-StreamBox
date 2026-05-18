@@ -479,6 +479,67 @@ pub async fn apply_rustdesk_config(
     Ok(())
 }
 
+pub async fn apply_sunshine_config(
+    state: &Arc<AppState>,
+    old_config: &crate::config::SunshineConfig,
+    new_config: &crate::config::SunshineConfig,
+    options: ConfigApplyOptions,
+) -> Result<()> {
+    tracing::info!("Applying Sunshine/GameStream config changes...");
+
+    let mut sunshine_guard = state.sunshine.write().await;
+
+    if old_config.enabled && !new_config.enabled {
+        if let Some(ref service) = *sunshine_guard {
+            service.stop().await;
+            tracing::info!("Sunshine-compatible service stopped");
+        }
+        *sunshine_guard = None;
+    }
+
+    if new_config.enabled {
+        let need_restart = options.force
+            || old_config.bind != new_config.bind
+            || old_config.http_port != new_config.http_port
+            || old_config.https_port != new_config.https_port
+            || old_config.hostname != new_config.hostname
+            || old_config.unique_id != new_config.unique_id
+            || old_config.app_id != new_config.app_id
+            || old_config.app_title != new_config.app_title;
+
+        if sunshine_guard.is_none() {
+            let service = crate::sunshine::SunshineService::new(
+                new_config.clone(),
+                state.config.get().rtsp.clone(),
+                state.data_dir().clone(),
+                state.stream_manager.clone(),
+            );
+            service.start().await.map_err(|e| {
+                AppError::Config(format!("Failed to start Sunshine service: {}", e))
+            })?;
+            *sunshine_guard = Some(std::sync::Arc::new(service));
+            tracing::info!("Sunshine-compatible service started");
+        } else if need_restart {
+            if let Some(ref service) = *sunshine_guard {
+                service.stop().await;
+            }
+            let service = crate::sunshine::SunshineService::new(
+                new_config.clone(),
+                state.config.get().rtsp.clone(),
+                state.data_dir().clone(),
+                state.stream_manager.clone(),
+            );
+            service.start().await.map_err(|e| {
+                AppError::Config(format!("Failed to restart Sunshine service: {}", e))
+            })?;
+            *sunshine_guard = Some(std::sync::Arc::new(service));
+            tracing::info!("Sunshine-compatible service restarted");
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn apply_rtsp_config(
     state: &Arc<AppState>,
     old_config: &RtspConfig,

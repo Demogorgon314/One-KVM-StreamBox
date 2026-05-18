@@ -12,6 +12,8 @@
 use hwcodec::common::DataFormat;
 use hwcodec::ffmpeg_ram::CodecInfo;
 
+#[cfg(feature = "aml")]
+pub mod aml_venc;
 pub mod codec;
 pub mod h264;
 pub mod h265;
@@ -21,8 +23,6 @@ pub mod self_check;
 pub mod traits;
 pub mod vp8;
 pub mod vp9;
-#[cfg(feature = "aml")]
-pub mod aml_venc;
 
 // Core traits and types
 pub use traits::{

@@ -90,7 +90,10 @@ impl VideoDevice {
     pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if !path.exists() {
-            return Err(AppError::VideoError(format!("Video device not found: {}", path.display())));
+            return Err(AppError::VideoError(format!(
+                "Video device not found: {}",
+                path.display()
+            )));
         }
         Ok(Self { path })
     }
@@ -102,7 +105,10 @@ impl VideoDevice {
 
 fn aml_video_device_info(path: PathBuf) -> Result<VideoDeviceInfo> {
     if !path.exists() {
-        return Err(AppError::VideoError(format!("AML capture device not found: {}", path.display())));
+        return Err(AppError::VideoError(format!(
+            "AML capture device not found: {}",
+            path.display()
+        )));
     }
 
     Ok(build_aml_video_device_info(path))
