@@ -99,6 +99,19 @@ pub struct WebRtcStreamer {
     self_weak: StdRwLock<Option<std::sync::Weak<Self>>>,
 }
 
+fn shared_pipeline_config_matches(
+    current: &SharedVideoPipelineConfig,
+    desired: &SharedVideoPipelineConfig,
+) -> bool {
+    current.resolution == desired.resolution
+        && current.input_format == desired.input_format
+        && current.output_codec == desired.output_codec
+        && current.bitrate_preset == desired.bitrate_preset
+        && current.fps == desired.fps
+        && current.hdr_mode == desired.hdr_mode
+        && current.encoder_backend == desired.encoder_backend
+}
+
 impl WebRtcStreamer {
     pub fn new() -> Arc<Self> {
         Self::with_config(WebRtcStreamerConfig::default())
@@ -463,26 +476,6 @@ impl WebRtcStreamer {
 
     /// Ensure video pipeline is initialized and running
     async fn ensure_video_pipeline(&self) -> Result<Arc<SharedVideoPipeline>> {
-        let mut pipeline_guard = self.video_pipeline.write().await;
-
-        if let Some(ref pipeline) = *pipeline_guard {
-            let running = pipeline.is_running();
-            info!(
-                "ensure_video_pipeline: existing pipeline found, is_running={}, running_rx={}",
-                running,
-                *pipeline.running_watch().borrow()
-            );
-            if running {
-                info!("ensure_video_pipeline: returning existing running pipeline");
-                return Ok(pipeline.clone());
-            }
-            info!("ensure_video_pipeline: existing pipeline not running, dropping and recreating");
-            // Drop the stale pipeline reference so we create a new one
-            *pipeline_guard = None;
-        } else {
-            info!("ensure_video_pipeline: no existing pipeline, will create new");
-        }
-
         let codec = *self.video_codec.read().await;
         let pipeline_config = {
             let config = self.config.read().await;
@@ -496,6 +489,49 @@ impl WebRtcStreamer {
                 encoder_backend: config.encoder_backend,
             }
         };
+
+        let mut pipeline_guard = self.video_pipeline.write().await;
+
+        if let Some(ref pipeline) = *pipeline_guard {
+            let running = pipeline.is_running();
+            info!(
+                "ensure_video_pipeline: existing pipeline found, is_running={}, running_rx={}",
+                running,
+                *pipeline.running_watch().borrow()
+            );
+            if running {
+                let current_config = pipeline.config().await;
+                if shared_pipeline_config_matches(&current_config, &pipeline_config) {
+                    info!("ensure_video_pipeline: returning existing running pipeline");
+                    return Ok(pipeline.clone());
+                }
+
+                info!(
+                    "ensure_video_pipeline: existing pipeline config changed \
+                     (codec {:?}->{:?}, {}x{}@{} -> {}x{}@{}, hdr {:?}->{:?}); recreating",
+                    current_config.output_codec,
+                    pipeline_config.output_codec,
+                    current_config.resolution.width,
+                    current_config.resolution.height,
+                    current_config.fps,
+                    pipeline_config.resolution.width,
+                    pipeline_config.resolution.height,
+                    pipeline_config.fps,
+                    current_config.hdr_mode,
+                    pipeline_config.hdr_mode
+                );
+                pipeline
+                    .stop_and_wait(std::time::Duration::from_secs(2))
+                    .await;
+                *pipeline_guard = None;
+            } else {
+                info!("ensure_video_pipeline: existing pipeline not running, dropping and recreating");
+                // Drop the stale pipeline reference so we create a new one
+                *pipeline_guard = None;
+            }
+        } else {
+            info!("ensure_video_pipeline: no existing pipeline, will create new");
+        }
 
         info!("Creating shared video pipeline for {:?}", codec);
         let pipeline = SharedVideoPipeline::new(pipeline_config)?;
@@ -1008,6 +1044,7 @@ impl WebRtcStreamer {
             input_format: config.input_format,
             bitrate_preset: config.bitrate_preset,
             fps: config.fps,
+            hdr_mode: config.hdr_mode,
             audio_enabled: *self.audio_enabled.read().await,
         };
         drop(config);

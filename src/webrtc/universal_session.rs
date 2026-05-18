@@ -30,6 +30,7 @@ use super::rtp::OpusAudioTrack;
 use super::signaling::{ConnectionState, IceCandidate, SdpAnswer, SdpOffer};
 use super::video_track::{UniversalVideoTrack, UniversalVideoTrackConfig, VideoCodec};
 use crate::audio::OpusFrame;
+use crate::config::HdrMode;
 use crate::error::{AppError, Result};
 use crate::hid::datachannel::{parse_hid_message, HidChannelEvent};
 use crate::hid::HidController;
@@ -93,6 +94,7 @@ pub struct UniversalSessionConfig {
     pub input_format: PixelFormat,
     pub bitrate_preset: BitratePreset,
     pub fps: u32,
+    pub hdr_mode: HdrMode,
     pub audio_enabled: bool,
 }
 
@@ -105,6 +107,7 @@ impl Default for UniversalSessionConfig {
             input_format: PixelFormat::Mjpeg,
             bitrate_preset: BitratePreset::Balanced,
             fps: 30,
+            hdr_mode: HdrMode::Auto,
             audio_enabled: false,
         }
     }
@@ -160,6 +163,8 @@ impl UniversalSession {
         );
 
         let video_codec = encoder_type_to_video_codec(config.codec);
+        let h265_main10 =
+            config.codec == VideoEncoderType::H265 && config.hdr_mode == HdrMode::Passthrough;
         let track_config = UniversalVideoTrackConfig {
             track_id: format!("video-{}", &session_id[..8.min(session_id.len())]),
             stream_id: "one-kvm-stream".to_string(),
@@ -167,6 +172,7 @@ impl UniversalSession {
             resolution: config.resolution,
             bitrate_kbps: config.bitrate_preset.bitrate_kbps(),
             fps: config.fps,
+            h265_main10,
         };
         let video_track = Arc::new(UniversalVideoTrack::new(track_config));
 
@@ -202,50 +208,49 @@ impl UniversalSession {
                 },
             ];
 
-            media_engine
-                .register_codec(
-                    RTCRtpCodecParameters {
-                        capability: RTCRtpCodecCapability {
-                            mime_type: MIME_TYPE_H265.to_owned(),
-                            clock_rate: 90000,
-                            channels: 0,
-                            sdp_fmtp_line: "level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST"
-                                .to_owned(),
-                            rtcp_feedback: video_rtcp_feedback.clone(),
+            let register_h265 = |media_engine: &mut MediaEngine,
+                                 payload_type: u8,
+                                 profile_id: u8,
+                                 rtcp_feedback: Vec<RTCPFeedback>|
+             -> Result<()> {
+                media_engine
+                    .register_codec(
+                        RTCRtpCodecParameters {
+                            capability: RTCRtpCodecCapability {
+                                mime_type: MIME_TYPE_H265.to_owned(),
+                                clock_rate: 90000,
+                                channels: 0,
+                                sdp_fmtp_line: format!(
+                                    "level-id=180;profile-id={};tier-flag=0;tx-mode=SRST",
+                                    profile_id
+                                ),
+                                rtcp_feedback,
+                            },
+                            payload_type,
+                            ..Default::default()
                         },
-                        payload_type: 49,
-                        ..Default::default()
-                    },
-                    RTPCodecType::Video,
-                )
-                .map_err(|e| {
-                    AppError::VideoError(format!("Failed to register H.265 codec: {}", e))
-                })?;
+                        RTPCodecType::Video,
+                    )
+                    .map_err(|e| {
+                        AppError::VideoError(format!(
+                            "Failed to register H.265 profile {} codec: {}",
+                            profile_id, e
+                        ))
+                    })
+            };
 
-            media_engine
-                .register_codec(
-                    RTCRtpCodecParameters {
-                        capability: RTCRtpCodecCapability {
-                            mime_type: MIME_TYPE_H265.to_owned(),
-                            clock_rate: 90000,
-                            channels: 0,
-                            sdp_fmtp_line: "level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST"
-                                .to_owned(),
-                            rtcp_feedback: video_rtcp_feedback,
-                        },
-                        payload_type: 51,
-                        ..Default::default()
-                    },
-                    RTPCodecType::Video,
-                )
-                .map_err(|e| {
-                    AppError::VideoError(format!(
-                        "Failed to register H.265 codec (profile 2): {}",
-                        e
-                    ))
-                })?;
+            if h265_main10 {
+                register_h265(&mut media_engine, 51, 2, video_rtcp_feedback.clone())?;
+                register_h265(&mut media_engine, 49, 1, video_rtcp_feedback)?;
+            } else {
+                register_h265(&mut media_engine, 49, 1, video_rtcp_feedback.clone())?;
+                register_h265(&mut media_engine, 51, 2, video_rtcp_feedback)?;
+            }
 
-            info!("Registered H.265/HEVC codec for session {}", session_id);
+            info!(
+                "Registered H.265/HEVC codecs for session {} (main10={})",
+                session_id, h265_main10
+            );
         }
 
         media_engine

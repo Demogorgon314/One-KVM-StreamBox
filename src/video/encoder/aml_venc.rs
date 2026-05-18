@@ -163,6 +163,10 @@ impl AmlVencEncoder {
         encode_info.rc_mode = rc_mode;
         encode_info.bitstream_buf_sz_kb = choose_bitstream_buf_sz_kb(width, height);
 
+        if codec == VlCodecId::H265 {
+            encode_info.profile = if bit_depth == 10 { 2 } else { 1 };
+        }
+
         if bit_depth == 10 {
             encode_info.vui_parameters_present_flag = 1;
             encode_info.video_signal_type_present_flag = 1;

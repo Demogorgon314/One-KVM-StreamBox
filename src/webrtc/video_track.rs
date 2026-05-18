@@ -18,6 +18,10 @@ use crate::error::{AppError, Result};
 use crate::video::types::Resolution;
 
 const RTP_MTU: usize = 1200;
+const H265_MAIN_PAYLOAD_TYPE: u8 = 49;
+const H265_MAIN10_PAYLOAD_TYPE: u8 = 51;
+const H265_MAIN_FMTP: &str = "level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST";
+const H265_MAIN10_FMTP: &str = "level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoCodec {
@@ -46,7 +50,7 @@ impl VideoCodec {
             VideoCodec::H264 => 96,
             VideoCodec::VP8 => 97,
             VideoCodec::VP9 => 98,
-            VideoCodec::H265 => 99,
+            VideoCodec::H265 => H265_MAIN_PAYLOAD_TYPE,
         }
     }
 
@@ -55,7 +59,7 @@ impl VideoCodec {
             VideoCodec::H264 => {
                 "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string()
             }
-            VideoCodec::H265 => "level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST".to_string(),
+            VideoCodec::H265 => H265_MAIN_FMTP.to_string(),
             VideoCodec::VP8 => String::new(),
             VideoCodec::VP9 => "profile-id=0".to_string(),
         }
@@ -85,6 +89,7 @@ pub struct UniversalVideoTrackConfig {
     pub resolution: Resolution,
     pub bitrate_kbps: u32,
     pub fps: u32,
+    pub h265_main10: bool,
 }
 
 impl Default for UniversalVideoTrackConfig {
@@ -96,6 +101,7 @@ impl Default for UniversalVideoTrackConfig {
             resolution: Resolution::HD720,
             bitrate_kbps: 8000,
             fps: 30,
+            h265_main10: false,
         }
     }
 }
@@ -167,7 +173,11 @@ impl UniversalVideoTrack {
             mime_type: config.codec.mime_type().to_string(),
             clock_rate: config.codec.clock_rate(),
             channels: 0,
-            sdp_fmtp_line: config.codec.sdp_fmtp(),
+            sdp_fmtp_line: if config.codec == VideoCodec::H265 && config.h265_main10 {
+                H265_MAIN10_FMTP.to_string()
+            } else {
+                config.codec.sdp_fmtp()
+            },
             rtcp_feedback: vec![],
         };
 
@@ -265,6 +275,11 @@ impl UniversalVideoTrack {
     }
 
     async fn write_h265_frame(&self, data: Bytes, is_keyframe: bool) -> Result<()> {
+        let data = if self.config.h265_main10 && is_keyframe {
+            Bytes::from(insert_h265_hdr10_sei(&data))
+        } else {
+            data
+        };
         self.send_h265_rtp(data, is_keyframe).await
     }
 
@@ -367,7 +382,11 @@ impl UniversalVideoTrack {
                     padding: false,
                     extension: false,
                     marker: is_last,
-                    payload_type: 49,
+                    payload_type: if self.config.h265_main10 {
+                        H265_MAIN10_PAYLOAD_TYPE
+                    } else {
+                        H265_MAIN_PAYLOAD_TYPE
+                    },
                     sequence_number: seq,
                     timestamp,
                     ssrc: 0,
@@ -389,6 +408,116 @@ impl UniversalVideoTrack {
     }
 }
 
+fn append_sei_payload_header(out: &mut Vec<u8>, mut payload_type: usize, mut payload_size: usize) {
+    while payload_type >= 0xff {
+        out.push(0xff);
+        payload_type -= 0xff;
+    }
+    out.push(payload_type as u8);
+
+    while payload_size >= 0xff {
+        out.push(0xff);
+        payload_size -= 0xff;
+    }
+    out.push(payload_size as u8);
+}
+
+fn append_be16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn append_be32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn hdr10_sei_annex_b() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 2 + 24 + 2 + 4 + 1);
+
+    append_sei_payload_header(&mut payload, 137, 24);
+    for (x, y) in [(13250, 34500), (7500, 3000), (34000, 16000)] {
+        append_be16(&mut payload, x);
+        append_be16(&mut payload, y);
+    }
+    append_be16(&mut payload, 15635);
+    append_be16(&mut payload, 16450);
+    append_be32(&mut payload, 10_000_000);
+    append_be32(&mut payload, 50);
+
+    append_sei_payload_header(&mut payload, 144, 4);
+    append_be16(&mut payload, 1000);
+    append_be16(&mut payload, 400);
+
+    payload.push(0x80);
+
+    let mut sei = Vec::with_capacity(4 + 2 + payload.len());
+    sei.extend_from_slice(&[0, 0, 0, 1, 0x4e, 0x01]);
+    sei.extend_from_slice(&payload);
+    sei
+}
+
+fn h265_nal_type(nal: &[u8]) -> Option<u8> {
+    if nal.len() < 2 {
+        None
+    } else {
+        Some((nal[0] >> 1) & 0x3f)
+    }
+}
+
+fn h265_annex_b_nals(data: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut nals = Vec::new();
+    let mut pos = 0;
+    while let Some((start, sc_len)) = find_start_code(data, pos) {
+        let nal_start = start + sc_len;
+        let next = find_start_code(data, nal_start)
+            .map(|(next_start, _)| next_start)
+            .unwrap_or(data.len());
+        if nal_start < next {
+            nals.push((start, sc_len, next));
+        }
+        pos = next;
+    }
+    nals
+}
+
+fn find_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut i = from;
+    while i + 3 <= data.len() {
+        if data[i..].starts_with(&[0, 0, 1]) {
+            return Some((i, 3));
+        }
+        if i + 4 <= data.len() && data[i..].starts_with(&[0, 0, 0, 1]) {
+            return Some((i, 4));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn insert_h265_hdr10_sei(data: &[u8]) -> Vec<u8> {
+    let nals = h265_annex_b_nals(data);
+    if nals.is_empty() {
+        let mut out = hdr10_sei_annex_b();
+        out.extend_from_slice(data);
+        return out;
+    }
+
+    let mut insert_at = nals[0].0;
+    for (start, sc_len, end) in nals {
+        let nal_start = start + sc_len;
+        match h265_nal_type(&data[nal_start..end]) {
+            Some(32 | 33 | 34 | 35 | 39 | 40) => insert_at = end,
+            _ => break,
+        }
+    }
+
+    let sei = hdr10_sei_annex_b();
+    let mut out = Vec::with_capacity(data.len() + sei.len());
+    out.extend_from_slice(&data[..insert_at]);
+    out.extend_from_slice(&sei);
+    out.extend_from_slice(&data[insert_at..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +531,7 @@ mod tests {
 
         assert_eq!(VideoCodec::H264.clock_rate(), 90000);
         assert_eq!(VideoCodec::H265.clock_rate(), 90000);
+        assert_eq!(VideoCodec::H265.sdp_fmtp(), H265_MAIN_FMTP);
     }
 
     #[test]
@@ -412,5 +542,24 @@ mod tests {
 
         let h265_config = UniversalVideoTrackConfig::h265(Resolution::HD720, 2000, 30);
         assert_eq!(h265_config.codec, VideoCodec::H265);
+    }
+
+    #[test]
+    fn test_hdr10_sei_insertion_after_parameter_sets() {
+        let frame = [
+            &[0, 0, 0, 1, 0x40, 0x01, 0xaa][..],
+            &[0, 0, 0, 1, 0x42, 0x01, 0xbb][..],
+            &[0, 0, 0, 1, 0x44, 0x01, 0xcc][..],
+            &[0, 0, 0, 1, 0x26, 0x01, 0xdd][..],
+        ]
+        .concat();
+
+        let with_sei = insert_h265_hdr10_sei(&frame);
+        let nals: Vec<u8> = h265_annex_b_nals(&with_sei)
+            .into_iter()
+            .filter_map(|(start, sc_len, end)| h265_nal_type(&with_sei[start + sc_len..end]))
+            .collect();
+
+        assert_eq!(nals, vec![32, 33, 34, 39, 19]);
     }
 }
