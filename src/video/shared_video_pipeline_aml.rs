@@ -8,7 +8,16 @@ use crate::error::{AppError, Result};
 use crate::video::aml_pipeline::{AmlPipeline, AmlPipelineConfig};
 use crate::video::encoder::registry::VideoEncoderType;
 use crate::video::format::{PixelFormat, Resolution};
-use crate::video::shared_video_pipeline::EncodedVideoFrame;
+
+#[derive(Debug, Clone)]
+pub struct EncodedVideoFrame {
+    pub data: bytes::Bytes,
+    pub pts_ms: i64,
+    pub is_keyframe: bool,
+    pub sequence: u64,
+    pub duration: Duration,
+    pub codec: VideoEncoderType,
+}
 
 #[derive(Debug, Clone)]
 pub struct SharedVideoPipelineConfig {
@@ -121,6 +130,14 @@ impl SharedVideoPipeline {
         &self,
         _notifier: Option<Arc<dyn Fn(PipelineStateNotification) + Send + Sync>>,
     ) {
+    }
+
+    pub fn take_pending_sync_geometry(&self) -> Option<(Resolution, PixelFormat)> {
+        None
+    }
+
+    pub fn take_device_lost_reason(&self) -> Option<String> {
+        None
     }
 
     pub async fn start_with_device(

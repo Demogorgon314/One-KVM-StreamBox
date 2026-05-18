@@ -35,9 +35,45 @@ pub enum StreamerState {
     Ready,
     Streaming,
     NoSignal,
+    NoCable,
+    NoSync,
+    OutOfRange,
+    UvcUsbError,
+    UvcCaptureStall,
     Error,
     DeviceLost,
     Recovering,
+}
+
+impl StreamerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StreamerState::Uninitialized => "uninitialized",
+            StreamerState::Ready => "ready",
+            StreamerState::Streaming => "streaming",
+            StreamerState::NoSignal => "no_signal",
+            StreamerState::NoCable => "no_cable",
+            StreamerState::NoSync => "no_sync",
+            StreamerState::OutOfRange => "out_of_range",
+            StreamerState::UvcUsbError => "uvc_usb_error",
+            StreamerState::UvcCaptureStall => "uvc_capture_stall",
+            StreamerState::Error => "error",
+            StreamerState::DeviceLost => "device_lost",
+            StreamerState::Recovering => "recovering",
+        }
+    }
+
+    pub fn is_no_signal_like(self) -> bool {
+        matches!(
+            self,
+            StreamerState::NoSignal
+                | StreamerState::NoCable
+                | StreamerState::NoSync
+                | StreamerState::OutOfRange
+                | StreamerState::UvcUsbError
+                | StreamerState::UvcCaptureStall
+        )
+    }
 }
 
 pub struct Streamer {
@@ -81,7 +117,8 @@ impl Streamer {
     }
 
     pub fn is_config_changing(&self) -> bool {
-        self.config_changing.load(std::sync::atomic::Ordering::SeqCst)
+        self.config_changing
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub async fn is_streaming(&self) -> bool {
@@ -101,7 +138,9 @@ impl Streamer {
         (config.format, config.resolution, config.fps)
     }
 
-    pub async fn current_capture_config(&self) -> (Option<PathBuf>, Resolution, PixelFormat, u32, u8) {
+    pub async fn current_capture_config(
+        &self,
+    ) -> (Option<PathBuf>, Resolution, PixelFormat, u32, u8) {
         let config = self.config.read().await;
         (
             config.device_path.clone(),
@@ -123,7 +162,8 @@ impl Streamer {
         resolution: Resolution,
         fps: u32,
     ) -> Result<()> {
-        self.config_changing.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.config_changing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let device = enumerate_devices()?
             .into_iter()
@@ -148,7 +188,8 @@ impl Streamer {
         })
         .await;
 
-        self.config_changing.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.config_changing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -213,18 +254,13 @@ impl Streamer {
 
     async fn publish_state(&self) {
         let state = self.state().await;
-        let state = match state {
-            StreamerState::Uninitialized => "uninitialized",
-            StreamerState::Ready => "ready",
-            StreamerState::Streaming => "streaming",
-            StreamerState::NoSignal => "no_signal",
-            StreamerState::Error => "error",
-            StreamerState::DeviceLost => "device_lost",
-            StreamerState::Recovering => "recovering",
-        };
+        let state = state.as_str();
         self.publish_event(SystemEvent::StreamStateChanged {
             state: state.to_string(),
-            device: self.current_device().await.map(|d| d.path.display().to_string()),
+            device: self
+                .current_device()
+                .await
+                .map(|d| d.path.display().to_string()),
             reason: None,
             next_retry_ms: None,
         })
@@ -267,16 +303,7 @@ impl serde::Serialize for StreamerState {
     where
         S: serde::Serializer,
     {
-        let s = match self {
-            StreamerState::Uninitialized => "uninitialized",
-            StreamerState::Ready => "ready",
-            StreamerState::Streaming => "streaming",
-            StreamerState::NoSignal => "no_signal",
-            StreamerState::Error => "error",
-            StreamerState::DeviceLost => "device_lost",
-            StreamerState::Recovering => "recovering",
-        };
-        serializer.serialize_str(s)
+        serializer.serialize_str(self.as_str())
     }
 }
 
