@@ -39,6 +39,7 @@ struct CaptureConfig {
     resolution: Resolution,
     fps: u32,
     img_format: VlImgFormat,
+    signal: SignalMetadata,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +142,13 @@ fn resolve_capture_params(
             let color_mode = detect_hdr_color_mode(signal_info);
             (color_mode, VfmcapOutputFmt::Nv12)
         }
+        crate::config::HdrMode::Passthrough => {
+            if is_hdr {
+                (VfmcapColorMode::Passthrough, VfmcapOutputFmt::P010)
+            } else {
+                (VfmcapColorMode::Passthrough, VfmcapOutputFmt::Nv12)
+            }
+        }
     }
 }
 
@@ -195,7 +203,11 @@ fn open_capture_for_resolution(
     let resolution = capture.resolution();
     let fps = match capture.signal_info() {
         Ok(info) if info.fps > 0 => {
-            let raw_fps = if info.fps > 1000 { info.fps / 1000 } else { info.fps };
+            let raw_fps = if info.fps > 1000 {
+                info.fps / 1000
+            } else {
+                info.fps
+            };
             if config.max_fps > 0.0 {
                 raw_fps.min(config.max_fps as u32)
             } else {
@@ -221,6 +233,7 @@ fn open_capture_for_resolution(
         resolution,
         fps,
         img_format,
+        signal,
     })
 }
 
@@ -336,10 +349,7 @@ impl AmlPipeline {
         self.keyframe_requested.store(true, Ordering::Release);
     }
 
-    pub fn add_subscriber(
-        &self,
-        tx: tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>,
-    ) {
+    pub fn add_subscriber(&self, tx: tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>) {
         self.latest_subscribers.write().push(tx);
     }
 
@@ -481,6 +491,7 @@ impl AmlPipeline {
             resolution: actual_resolution,
             fps: actual_fps,
             img_format,
+            signal: initial_signal,
         } = match open_capture_for_resolution(config) {
             Ok(capture_config) => capture_config,
             Err(e) => {
@@ -510,7 +521,11 @@ impl AmlPipeline {
 
         info!(
             "AML pipeline: encoder created {}x{} @ {}fps codec={:?} img_format={:?}",
-            actual_resolution.width, actual_resolution.height, actual_fps, config.output_codec, img_format
+            actual_resolution.width,
+            actual_resolution.height,
+            actual_fps,
+            config.output_codec,
+            img_format
         );
         let encoder_width = encoder.width();
         let encoder_height = encoder.height();
@@ -518,10 +533,7 @@ impl AmlPipeline {
         // 4. Generate and broadcast VPS+SPS+PPS header
         match encoder.generate_header() {
             Ok(header) => {
-                info!(
-                    "AML pipeline: generated header ({} bytes)",
-                    header.len()
-                );
+                info!("AML pipeline: generated header ({} bytes)", header.len());
                 let header_frame = Arc::new(EncodedVideoFrame {
                     data: Bytes::from(header),
                     pts_ms: 0,
@@ -542,6 +554,7 @@ impl AmlPipeline {
         let mut frame_count: u64 = 0;
         let mut fps_frame_count: u64 = 0;
         let mut last_fps_time = Instant::now();
+        let mut last_signal_check = Instant::now();
 
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<EncodeTask>(8);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<u32>();
@@ -586,7 +599,9 @@ impl AmlPipeline {
             // Actual encoder recreation happens when next_frame returns reconfigured=true.
             let event = capture.poll_event(0);
             if event == crate::ffi::vfmcap::VFMCAP_EVENT_SOURCE_CHANGE {
-                info!("AML pipeline: source change event detected, waiting for reconfigured frame...");
+                info!(
+                    "AML pipeline: source change event detected, waiting for reconfigured frame..."
+                );
             } else if event == crate::ffi::vfmcap::VFMCAP_EVENT_NOSIG {
                 trace!("AML pipeline: no signal");
             }
@@ -624,6 +639,29 @@ impl AmlPipeline {
                         dma.bytesperline, dma.size, dma.format,
                         encoder_width, encoder_height
                     );
+                }
+            }
+
+            if last_signal_check.elapsed() >= Duration::from_millis(500) {
+                last_signal_check = Instant::now();
+                let current_signal = sysfs_read_signal();
+                if current_signal.hdr_status != initial_signal.hdr_status
+                    || current_signal.bitdepth != initial_signal.bitdepth
+                    || current_signal.signal_type != initial_signal.signal_type
+                {
+                    info!(
+                        "AML pipeline: HDMI signal changed, stopping for rebuild (hdr {}->{}, bitdepth {}->{}, signal_type {:#x}->{:#x}, eotf {}->{})",
+                        initial_signal.hdr_status,
+                        current_signal.hdr_status,
+                        initial_signal.bitdepth,
+                        current_signal.bitdepth,
+                        initial_signal.signal_type,
+                        current_signal.signal_type,
+                        initial_signal.hdr_eotf,
+                        current_signal.hdr_eotf
+                    );
+                    capture.release_frame(&capture_result.frame);
+                    break;
                 }
             }
 

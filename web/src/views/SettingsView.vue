@@ -39,6 +39,7 @@ import type {
   OtgHidProfile,
   OtgHidFunctions,
 } from '@/types/generated'
+import { HdrMode } from '@/types/generated'
 import { formatFpsLabel, toConfigFps } from '@/lib/fps'
 import { useClipboard } from '@/composables/useClipboard'
 import { getVideoFormatState } from '@/lib/video-format-support'
@@ -408,6 +409,7 @@ const config = ref({
   video_width: 1920,
   video_height: 1080,
   video_fps: 30,
+  video_hdr_mode: HdrMode.Auto,
   hid_backend: 'ch9329',
   hid_serial_device: '',
   hid_serial_baudrate: 9600,
@@ -1104,6 +1106,7 @@ async function saveConfig() {
         width: config.value.video_width,
         height: config.value.video_height,
         fps: toConfigFps(config.value.video_fps),
+        hdr_mode: config.value.video_hdr_mode,
       })
     }
 
@@ -1166,6 +1169,7 @@ async function loadConfig() {
       video_width: video.width || 1920,
       video_height: video.height || 1080,
       video_fps: video.fps || 30,
+      video_hdr_mode: video.hdr_mode || HdrMode.Auto,
       hid_backend: hid.backend || 'none',
       hid_serial_device: hid.ch9329_port || '',
       hid_serial_baudrate: hid.ch9329_baudrate || 9600,
@@ -2401,6 +2405,14 @@ watch(() => route.query.tab, (tab) => {
                       <option v-if="!availableFps.includes(config.video_fps)" :value="config.video_fps">{{ formatFpsLabel(config.video_fps) }}</option>
                     </select>
                   </div>
+                </div>
+                <div class="space-y-2">
+                  <Label for="video-hdr-mode">{{ t('settings.hdrMode') }}</Label>
+                  <select id="video-hdr-mode" v-model="config.video_hdr_mode" class="w-full h-9 px-3 rounded-md border border-input bg-background text-sm">
+                    <option :value="HdrMode.Auto">{{ t('settings.hdrAuto') }}</option>
+                    <option :value="HdrMode.SdrOnly">{{ t('settings.hdrSdrOnly') }}</option>
+                    <option :value="HdrMode.Passthrough">{{ t('settings.hdrPassthrough') }}</option>
+                  </select>
                 </div>
               </CardContent>
             </Card>

@@ -28,6 +28,17 @@ export interface VideoConfig {
 	fps: number;
 	/** JPEG quality (1-100) */
 	quality: number;
+	/** HDR handling mode */
+	hdr_mode: HdrMode;
+}
+
+export enum HdrMode {
+	/** Auto: convert HDR inputs to SDR BT.709 NV12 for browser compatibility. */
+	Auto = "auto",
+	/** SDR only: convert HDR inputs to SDR BT.709 NV12 before encoding. */
+	SdrOnly = "sdr_only",
+	/** HDR passthrough: preserve HDR inputs as 10-bit P010 for HDR-capable clients. */
+	Passthrough = "passthrough",
 }
 
 /** HID backend type */
@@ -642,6 +653,7 @@ export interface VideoConfigUpdate {
 	height?: number;
 	fps?: number;
 	quality?: number;
+	hdr_mode?: HdrMode;
 }
 
 /**
@@ -798,4 +810,3 @@ export enum CanonicalKey {
 	AltRight = "AltRight",
 	MetaRight = "MetaRight",
 }
-

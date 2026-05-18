@@ -1,4 +1,5 @@
 use parking_lot::RwLock as ParkingRwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
@@ -62,6 +63,7 @@ pub struct SharedVideoPipeline {
     subscribers: ParkingRwLock<Vec<tokio::sync::mpsc::UnboundedSender<Arc<EncodedVideoFrame>>>>,
     running: watch::Sender<bool>,
     running_rx: watch::Receiver<bool>,
+    pending_reconnect: AtomicBool,
 }
 
 impl SharedVideoPipeline {
@@ -73,6 +75,7 @@ impl SharedVideoPipeline {
             subscribers: ParkingRwLock::new(Vec::new()),
             running,
             running_rx,
+            pending_reconnect: AtomicBool::new(false),
         }))
     }
 
@@ -135,7 +138,14 @@ impl SharedVideoPipeline {
     }
 
     pub fn take_pending_sync_geometry(&self) -> Option<(Resolution, PixelFormat)> {
-        None
+        if self.pending_reconnect.swap(false, Ordering::AcqRel) {
+            self.config
+                .try_read()
+                .ok()
+                .map(|config| (config.resolution, config.input_format))
+        } else {
+            None
+        }
     }
 
     pub fn take_device_lost_reason(&self) -> Option<String> {
@@ -156,6 +166,7 @@ impl SharedVideoPipeline {
         }
 
         let config = self.config.read().await.clone();
+        self.pending_reconnect.store(true, Ordering::Release);
         let output_codec = match config.output_codec {
             VideoEncoderType::H264 | VideoEncoderType::H265 => config.output_codec,
             other => {

@@ -150,6 +150,8 @@ pub enum HdrMode {
     Auto,
     /// SDR only: convert HDR inputs to SDR BT.709 NV12 before encoding.
     SdrOnly,
+    /// HDR passthrough: preserve HDR inputs as 10-bit P010 for HDR-capable clients.
+    Passthrough,
 }
 
 /// Video capture configuration

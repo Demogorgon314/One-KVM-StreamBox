@@ -34,6 +34,7 @@ pub struct VideoConfigUpdate {
     pub height: Option<u32>,
     pub fps: Option<u32>,
     pub quality: Option<u32>,
+    pub hdr_mode: Option<HdrMode>,
 }
 
 impl VideoConfigUpdate {
@@ -85,6 +86,9 @@ impl VideoConfigUpdate {
         }
         if let Some(quality) = self.quality {
             config.quality = quality;
+        }
+        if let Some(hdr_mode) = self.hdr_mode {
+            config.hdr_mode = hdr_mode;
         }
     }
 }
