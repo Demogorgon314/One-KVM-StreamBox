@@ -10,6 +10,10 @@ use crate::video::aml_pipeline::{AmlPipeline, AmlPipelineConfig};
 use crate::video::encoder::registry::VideoEncoderType;
 use crate::video::format::{PixelFormat, Resolution};
 
+fn periodic_gop_frames(fps: u32) -> i32 {
+    fps.clamp(1, 120) as i32
+}
+
 #[derive(Debug, Clone)]
 pub struct EncodedVideoFrame {
     pub data: bytes::Bytes,
@@ -172,12 +176,16 @@ impl SharedVideoPipeline {
             }
         };
 
+        let gop = periodic_gop_frames(config.fps);
+        info!("AML pipeline: using periodic GOP of {} frames", gop);
+
         let aml = Arc::new(AmlPipeline::new(AmlPipelineConfig {
             max_width: config.resolution.width,
             max_height: config.resolution.height,
             max_fps: config.fps as f32,
             output_codec,
             bitrate_kbps: config.bitrate_preset.bitrate_kbps(),
+            gop,
             hdr_mode: config.hdr_mode,
             device: device_path.to_string_lossy().to_string(),
             ..AmlPipelineConfig::default()

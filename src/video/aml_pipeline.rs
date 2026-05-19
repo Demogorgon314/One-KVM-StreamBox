@@ -57,6 +57,86 @@ struct EncodeTask {
     format: u32,
 }
 
+fn find_annexb_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut i = from;
+    while i + 3 <= data.len() {
+        if i + 4 <= data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
+            return Some((i, 4));
+        }
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            return Some((i, 3));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn h265_nal_type(nal: &[u8]) -> Option<u8> {
+    if nal.len() < 2 {
+        return None;
+    }
+    Some((nal[0] >> 1) & 0x3f)
+}
+
+fn h265_parameter_sets_annexb(data: &[u8]) -> Option<Bytes> {
+    let mut vps: Option<&[u8]> = None;
+    let mut sps: Option<&[u8]> = None;
+    let mut pps: Option<&[u8]> = None;
+    let mut cursor = 0usize;
+
+    while let Some((start, start_len)) = find_annexb_start_code(data, cursor) {
+        let nal_start = start + start_len;
+        let nal_end = find_annexb_start_code(data, nal_start)
+            .map(|(next, _)| next)
+            .unwrap_or(data.len());
+        if nal_start < nal_end {
+            match h265_nal_type(&data[nal_start..nal_end]) {
+                Some(32) => vps = Some(&data[nal_start..nal_end]),
+                Some(33) => sps = Some(&data[nal_start..nal_end]),
+                Some(34) => pps = Some(&data[nal_start..nal_end]),
+                _ => {}
+            }
+        }
+        cursor = nal_end;
+    }
+
+    match (vps, sps, pps) {
+        (Some(vps), Some(sps), Some(pps)) => {
+            let mut parameter_sets = Vec::with_capacity(vps.len() + sps.len() + pps.len() + 12);
+            for nal in [vps, sps, pps] {
+                parameter_sets.extend_from_slice(&[0, 0, 0, 1]);
+                parameter_sets.extend_from_slice(nal);
+            }
+            Some(Bytes::from(parameter_sets))
+        }
+        _ => None,
+    }
+}
+
+fn h265_has_parameter_sets(data: &[u8]) -> bool {
+    h265_parameter_sets_annexb(data).is_some()
+}
+
+fn starts_with_annexb_start_code(data: &[u8]) -> bool {
+    data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1])
+}
+
+fn prepend_h265_parameter_sets(parameter_sets: &Bytes, data: Vec<u8>) -> Vec<u8> {
+    let needs_start_code = !starts_with_annexb_start_code(&data);
+    let mut patched = Vec::with_capacity(parameter_sets.len() + data.len() + 4);
+    patched.extend_from_slice(parameter_sets);
+    if needs_start_code {
+        patched.extend_from_slice(&[0, 0, 0, 1]);
+    }
+    patched.extend_from_slice(&data);
+    patched
+}
+
 fn sysfs_read_resolution() -> Option<(u32, u32)> {
     let s = std::fs::read_to_string(SIGNAL_INFO_SYSFS).ok()?;
     let mut w: u32 = 0;
@@ -358,6 +438,7 @@ pub struct AmlPipeline {
     sequence: AtomicU64,
     pipeline_start_time_ms: AtomicI64,
     keyframe_requested: AtomicBool,
+    codec_header: ParkingRwLock<Option<Arc<EncodedVideoFrame>>>,
     latest_subscribers: Arc<ParkingRwLock<Vec<mpsc::Sender<Arc<EncodedVideoFrame>>>>>,
     stats: Arc<tokio::sync::Mutex<PipelineStats>>,
 }
@@ -379,6 +460,7 @@ impl AmlPipeline {
             sequence: AtomicU64::new(0),
             pipeline_start_time_ms: AtomicI64::new(0),
             keyframe_requested: AtomicBool::new(false),
+            codec_header: ParkingRwLock::new(None),
             latest_subscribers: Arc::new(ParkingRwLock::new(Vec::new())),
             stats: Arc::new(tokio::sync::Mutex::new(PipelineStats::default())),
         }
@@ -397,6 +479,9 @@ impl AmlPipeline {
     }
 
     pub fn add_subscriber(&self, tx: mpsc::Sender<Arc<EncodedVideoFrame>>) {
+        if let Some(header) = self.codec_header.read().clone() {
+            let _ = tx.try_send(header);
+        }
         self.latest_subscribers.write().push(tx);
     }
 
@@ -465,6 +550,7 @@ impl AmlPipeline {
         fps: u32,
     ) {
         let encode_error_throttler = LogThrottler::with_secs(ENCODE_ERROR_THROTTLE_SECS);
+        let mut h265_parameter_sets: Option<Bytes> = None;
 
         while pipeline.running_flag.load(Ordering::Acquire) && encode_active.load(Ordering::Acquire)
         {
@@ -499,9 +585,31 @@ impl AmlPipeline {
                     if !encoded.is_delay {
                         let sequence = pipeline.sequence.fetch_add(1, Ordering::Relaxed) + 1;
                         let pts_ms = encoded.pts_us as i64 / 1000;
+                        let mut encoded_data = encoded.data;
+                        let mut keyframe_has_parameter_sets = false;
+
+                        if codec == VideoEncoderType::H265 {
+                            if let Some(parameter_sets) = h265_parameter_sets_annexb(&encoded_data)
+                            {
+                                keyframe_has_parameter_sets = true;
+                                h265_parameter_sets = Some(parameter_sets);
+                            } else if encoded.is_keyframe {
+                                keyframe_has_parameter_sets =
+                                    h265_has_parameter_sets(&encoded_data);
+                                if !keyframe_has_parameter_sets {
+                                    if let Some(parameter_sets) = &h265_parameter_sets {
+                                        encoded_data = prepend_h265_parameter_sets(
+                                            parameter_sets,
+                                            encoded_data,
+                                        );
+                                        keyframe_has_parameter_sets = true;
+                                    }
+                                }
+                            }
+                        }
 
                         let frame = Arc::new(EncodedVideoFrame {
-                            data: Bytes::from(encoded.data),
+                            data: Bytes::from(encoded_data),
                             pts_ms,
                             is_keyframe: encoded.is_keyframe,
                             sequence,
@@ -511,11 +619,12 @@ impl AmlPipeline {
 
                         if sequence <= 5 || frame.is_keyframe || sequence % 60 == 0 {
                             info!(
-                                "AML pipeline: encoded frame (seq={}, key={}, frame_type={:?}, size={})",
+                                "AML pipeline: encoded frame (seq={}, key={}, frame_type={:?}, size={}, h265_params={})",
                                 sequence,
                                 frame.is_keyframe,
                                 encoded.frame_type,
-                                frame.data.len()
+                                frame.data.len(),
+                                keyframe_has_parameter_sets
                             );
                         }
                         pipeline.broadcast_encoded(frame);
@@ -589,15 +698,18 @@ impl AmlPipeline {
                         duration: Duration::from_millis(0),
                         codec: config.output_codec,
                     });
+                    *self.codec_header.write() = Some(header_frame.clone());
                     self.broadcast_encoded(header_frame);
                 }
                 Err(e) => {
+                    *self.codec_header.write() = None;
                     warn!("Failed to generate encoder header: {}", e);
                 }
             }
 
             let mut consecutive_timeouts: u32 = 0;
             let mut consecutive_vulkan_errors: u32 = 0;
+            let mut captured_frame_count: u64 = 0;
             let mut frame_count: u64 = 0;
             let mut fps_frame_count: u64 = 0;
             let mut last_fps_time = Instant::now();
@@ -702,7 +814,7 @@ impl AmlPipeline {
                     }
                 };
 
-                if frame_count == 0 {
+                if captured_frame_count == 0 {
                     if let FrameData::DmaBuf(dma) = &capture_result.frame {
                         info!(
                             "AML pipeline: first frame dma fd={} fd2={} w={} h={} bpl={} size={} fmt={:#x} enc={}x{}",
@@ -712,6 +824,7 @@ impl AmlPipeline {
                         );
                     }
                 }
+                captured_frame_count += 1;
 
                 if last_signal_check.elapsed() >= Duration::from_millis(500) {
                     last_signal_check = Instant::now();
@@ -795,8 +908,8 @@ impl AmlPipeline {
 
             drop(capture);
             info!(
-                "AML pipeline: capture closed (Vulkan resources released), encoded {} frames",
-                frame_count
+                "AML pipeline: capture closed (Vulkan resources released), captured {} frames, encoded {} frames",
+                captured_frame_count, frame_count
             );
 
             if !should_recreate {

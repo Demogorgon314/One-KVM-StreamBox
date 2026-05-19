@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
 
@@ -279,7 +280,24 @@ impl WebRtcStreamer {
         pipeline: Arc<SharedVideoPipeline>,
         session_id: String,
     ) -> Arc<dyn Fn() + Send + Sync + 'static> {
+        let last_request = Arc::new(StdMutex::new(None::<Instant>));
         Arc::new(move || {
+            let now = Instant::now();
+            {
+                let mut guard = last_request.lock().expect("keyframe throttle poisoned");
+                if guard
+                    .map(|last| now.saturating_duration_since(last) < Duration::from_millis(250))
+                    .unwrap_or(false)
+                {
+                    trace!(
+                        "Coalescing keyframe request for session {} after reconnect",
+                        session_id
+                    );
+                    return;
+                }
+                *guard = Some(now);
+            }
+
             let pipeline = pipeline.clone();
             let sid = session_id.clone();
             tokio::spawn(async move {
@@ -1028,6 +1046,18 @@ impl WebRtcStreamer {
 
     /// Create a new WebRTC session
     pub async fn create_session(&self) -> Result<String> {
+        // The browser console is a single active WebRTC viewer. Page reloads and
+        // recovery attempts cannot reliably await `/webrtc/close`, so make the
+        // server-side session owner explicit: a fresh session replaces all older
+        // WebRTC sessions before subscribing to the shared encoder.
+        let closed_sessions = self.close_all_sessions().await;
+        if closed_sessions > 0 {
+            info!(
+                "Closed {} existing WebRTC sessions before creating replacement session",
+                closed_sessions
+            );
+        }
+
         let session_id = uuid::Uuid::new_v4().to_string();
         let codec = *self.video_codec.read().await;
 
@@ -1143,17 +1173,19 @@ impl WebRtcStreamer {
 
     /// Close all sessions
     pub async fn close_all_sessions(&self) -> usize {
-        let mut sessions = self.sessions.write().await;
-        let count = sessions.len();
+        let sessions_to_close = {
+            let mut sessions = self.sessions.write().await;
+            sessions.drain().collect::<Vec<_>>()
+        };
+        let count = sessions_to_close.len();
 
-        for (session_id, session) in sessions.drain() {
+        for (session_id, session) in sessions_to_close {
             debug!("Closing session {}", session_id);
             if let Err(e) = session.close().await {
                 warn!("Error closing session {}: {}", session_id, e);
             }
         }
 
-        drop(sessions);
         self.stop_pipeline_if_idle("After close_all_sessions").await;
 
         count
@@ -1206,7 +1238,7 @@ impl WebRtcStreamer {
 
     /// Cleanup closed sessions
     pub async fn cleanup(&self) {
-        let to_remove: Vec<String> = {
+        let to_close: Vec<(String, Arc<UniversalSession>)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .iter()
@@ -1218,18 +1250,23 @@ impl WebRtcStreamer {
                             | ConnectionState::Disconnected
                     )
                 })
-                .map(|(id, _)| id.clone())
+                .map(|(id, session)| (id.clone(), session.clone()))
                 .collect()
         };
 
-        if !to_remove.is_empty() {
+        if !to_close.is_empty() {
             let mut sessions = self.sessions.write().await;
-            for id in &to_remove {
+            for (id, _) in &to_close {
                 debug!("Removing closed session: {}", id);
                 sessions.remove(id);
             }
 
             drop(sessions);
+            for (id, session) in to_close {
+                if let Err(e) = session.close().await {
+                    warn!("Error closing stale session {}: {}", id, e);
+                }
+            }
             self.stop_pipeline_if_idle("After cleanup_closed_sessions")
                 .await;
         }

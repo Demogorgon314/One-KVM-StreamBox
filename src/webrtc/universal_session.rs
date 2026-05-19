@@ -86,6 +86,86 @@ fn h264_contains_parameter_sets(data: &[u8]) -> bool {
     false
 }
 
+fn h265_contains_parameter_sets(data: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 4 <= data.len() {
+        let sc_len = if i + 4 <= data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
+            4
+        } else if i + 3 <= data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            3
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let nal_start = i + sc_len;
+        if nal_start + 1 < data.len() {
+            let nal_type = (data[nal_start] >> 1) & 0x3F;
+            if (32..=34).contains(&nal_type) {
+                return true;
+            }
+        }
+        i = nal_start.saturating_add(1);
+    }
+
+    if data.len() >= 2 {
+        let nal_type = (data[0] >> 1) & 0x3F;
+        if (32..=34).contains(&nal_type) {
+            return true;
+        }
+    }
+
+    let mut pos = 0usize;
+    while pos + 4 <= data.len() {
+        let nalu_len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+        if nalu_len == 0 || pos + nalu_len > data.len() {
+            break;
+        }
+        if pos + 1 < data.len() {
+            let nal_type = (data[pos] >> 1) & 0x3F;
+            if (32..=34).contains(&nal_type) {
+                return true;
+            }
+        }
+        pos += nalu_len;
+    }
+
+    false
+}
+
+fn drain_video_frames_until_latest(
+    frame_rx: &mut tokio::sync::mpsc::Receiver<Arc<EncodedVideoFrame>>,
+    first_frame: Option<Arc<EncodedVideoFrame>>,
+    expected_codec: VideoEncoderType,
+) -> (Option<Arc<EncodedVideoFrame>>, usize) {
+    let mut latest = first_frame;
+    let mut latest_keyframe = latest
+        .as_ref()
+        .filter(|frame| frame.codec == expected_codec && frame.is_keyframe)
+        .cloned();
+    let mut drained = 0usize;
+
+    while let Ok(frame) = frame_rx.try_recv() {
+        if frame.codec != expected_codec {
+            continue;
+        }
+        drained += 1;
+        if frame.is_keyframe {
+            latest_keyframe = Some(frame.clone());
+        }
+        latest = Some(frame);
+    }
+
+    (latest_keyframe.or(latest), drained)
+}
+
 #[derive(Debug, Clone)]
 pub struct UniversalSessionConfig {
     pub webrtc: WebRtcConfig,
@@ -568,12 +648,53 @@ impl UniversalSession {
                 session_id
             );
 
-            request_keyframe();
-            let mut waiting_for_keyframe = true;
-            let mut last_sequence: Option<u64> = None;
-            let mut last_keyframe_request = Instant::now() - Duration::from_secs(1);
+            let (pre_connection_frame, drained_before_keyframe) =
+                drain_video_frames_until_latest(&mut frame_rx, None, expected_codec);
+            if drained_before_keyframe > 0 {
+                info!(
+                    "Drained {} pre-connection video frames for session {}",
+                    drained_before_keyframe, session_id
+                );
+            }
 
             let mut frames_sent: u64 = 0;
+            let mut last_sequence: Option<u64> = None;
+            if let Some(frame) = pre_connection_frame {
+                let should_seed_decoder = frame.is_keyframe
+                    || match expected_codec {
+                        VideoEncoderType::H264 => h264_contains_parameter_sets(frame.data.as_ref()),
+                        VideoEncoderType::H265 => h265_contains_parameter_sets(frame.data.as_ref()),
+                        _ => false,
+                    };
+                if should_seed_decoder {
+                    match video_track
+                        .write_frame_bytes(frame.data.clone(), frame.is_keyframe)
+                        .await
+                    {
+                        Ok(()) => {
+                            frames_sent += 1;
+                            last_sequence = Some(frame.sequence);
+                            info!(
+                                "Sent pre-connection decoder seed for session {} (key={}, seq={}, bytes={})",
+                                session_id,
+                                frame.is_keyframe,
+                                frame.sequence,
+                                frame.data.len()
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to send pre-connection decoder seed for session {}: {}",
+                                session_id, e
+                            );
+                        }
+                    }
+                }
+            }
+
+            request_keyframe();
+            let mut waiting_for_keyframe = true;
+            let mut last_keyframe_request = Instant::now();
 
             loop {
                 tokio::select! {
@@ -591,7 +712,7 @@ impl UniversalSession {
                     }
 
                     result = frame_rx.recv() => {
-                        let encoded_frame = match result {
+                        let mut encoded_frame = match result {
                             Some(frame) => frame,
                             None => {
                                 info!("Video frame channel closed for session {}", session_id);
@@ -603,6 +724,24 @@ impl UniversalSession {
 
                         if frame_codec != expected_codec {
                             continue;
+                        }
+
+                        if waiting_for_keyframe {
+                            let (latest_frame, drained) = drain_video_frames_until_latest(
+                                &mut frame_rx,
+                                Some(encoded_frame),
+                                expected_codec,
+                            );
+                            if drained > 0 {
+                                debug!(
+                                    "Drained {} queued video frames while waiting for keyframe in session {}",
+                                    drained, session_id
+                                );
+                            }
+                            encoded_frame = match latest_frame {
+                                Some(frame) => frame,
+                                None => continue,
+                            };
                         }
 
                         if expected_codec == VideoEncoderType::H265
@@ -623,19 +762,23 @@ impl UniversalSession {
                             }
                         }
 
+                        let mut sent_keyframe_clears_wait = false;
                         if waiting_for_keyframe || gap_detected {
                             if encoded_frame.is_keyframe {
-                                waiting_for_keyframe = false;
+                                sent_keyframe_clears_wait = true;
                             } else {
                                 if gap_detected {
                                     waiting_for_keyframe = true;
                                 }
 
-                                // Some H264 encoders output SPS/PPS in a separate non-keyframe AU
+                                // Some encoders output parameter sets in a separate non-keyframe AU
                                 // before IDR. Keep this frame so browser can decode the next IDR.
-                                let forward_h264_parameter_frame = waiting_for_keyframe
-                                    && expected_codec == VideoEncoderType::H264
-                                    && h264_contains_parameter_sets(encoded_frame.data.as_ref());
+                                let forward_parameter_frame = waiting_for_keyframe
+                                    && match expected_codec {
+                                        VideoEncoderType::H264 => h264_contains_parameter_sets(encoded_frame.data.as_ref()),
+                                        VideoEncoderType::H265 => h265_contains_parameter_sets(encoded_frame.data.as_ref()),
+                                        _ => false,
+                                    };
 
                                 let now = Instant::now();
                                 if now.duration_since(last_keyframe_request)
@@ -644,7 +787,7 @@ impl UniversalSession {
                                     request_keyframe();
                                     last_keyframe_request = now;
                                 }
-                                if !forward_h264_parameter_frame {
+                                if !forward_parameter_frame {
                                     continue;
                                 }
                             }
@@ -664,8 +807,14 @@ impl UniversalSession {
                             Ok(()) => {
                                 frames_sent += 1;
                                 last_sequence = Some(encoded_frame.sequence);
+                                if sent_keyframe_clears_wait {
+                                    waiting_for_keyframe = false;
+                                }
                             }
                             Err(e) => {
+                                if sent_keyframe_clears_wait {
+                                    waiting_for_keyframe = true;
+                                }
                                 warn!(
                                     "Session {} failed to write video frame: sequence={}, keyframe={}, bytes={}, error={}",
                                     session_id,

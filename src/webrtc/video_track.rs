@@ -352,7 +352,7 @@ impl UniversalVideoTrack {
             }
         };
 
-        // Lock only around payloader + seq/ts bump, not RTP write.
+        // Lock only around payloader + seq/ts allocation, not RTP write.
         let (payloads, timestamp, seq_start, num_payloads) = {
             let mut state = h265_state.lock().await;
 
@@ -366,12 +366,10 @@ impl UniversalVideoTrack {
             let num_payloads = payloads.len();
             let seq_start = state.sequence_number;
 
-            state.sequence_number = state.sequence_number.wrapping_add(num_payloads as u16);
-            state.timestamp = state.timestamp.wrapping_add(state.timestamp_increment);
-
             (payloads, timestamp, seq_start, num_payloads)
         };
 
+        let mut bytes_written = 0usize;
         for (i, payload_data) in payloads.into_iter().enumerate() {
             let seq = seq_start.wrapping_add(i as u16);
             let is_last = i == num_payloads - 1;
@@ -395,13 +393,30 @@ impl UniversalVideoTrack {
                 payload: payload_data.clone(),
             };
 
-            if let Err(e) = rtp_track.write_rtp(&packet).await {
-                trace!("H265 write_rtp failed: {}", e);
-                return Err(AppError::WebRtcError(format!(
-                    "H265 write_rtp failed: {}",
-                    e
-                )));
+            match rtp_track.write_rtp(&packet).await {
+                Ok(n) => {
+                    bytes_written += n;
+                }
+                Err(e) => {
+                    trace!("H265 write_rtp failed: {}", e);
+                    return Err(AppError::WebRtcError(format!(
+                        "H265 write_rtp failed: {}",
+                        e
+                    )));
+                }
             }
+        }
+
+        if bytes_written == 0 {
+            return Err(AppError::WebRtcError(
+                "H265 RTP track is not ready: no RTP bindings accepted packets".to_string(),
+            ));
+        }
+
+        {
+            let mut state = h265_state.lock().await;
+            state.sequence_number = seq_start.wrapping_add(num_payloads as u16);
+            state.timestamp = timestamp.wrapping_add(state.timestamp_increment);
         }
 
         Ok(())
